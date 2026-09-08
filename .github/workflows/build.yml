@@ -1,0 +1,46 @@
+name: Build firmware
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sketch:
+          - HELIOS_HUNTER_ILI9341
+          - HELIOS_HUNTER_ST7789
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 support and libraries
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.3.11
+          arduino-cli lib install ArduinoJson LovyanGFX WiFiManager
+
+      - name: Compile ${{ matrix.sketch }}
+        run: |
+          arduino-cli compile \
+            --fqbn 'esp32:esp32:jczn_2432s028r:UploadSpeed=921600,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=4M,PartitionScheme=huge_app,DebugLevel=none,EraseFlash=none,LoopCore=1,EventsCore=1' \
+            --output-dir 'dist/${{ matrix.sketch }}' \
+            '${{ matrix.sketch }}'
+
+      - name: Upload ${{ matrix.sketch }} binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.sketch }}-firmware
+          path: dist/${{ matrix.sketch }}/*.bin
+          if-no-files-found: error
+
