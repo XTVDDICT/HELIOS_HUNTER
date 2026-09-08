@@ -3,9 +3,17 @@
 ![HeliosPool logo](assets/heliospool-main.png)
 
 HELIOS_HUNTER is multi-coin mining firmware for the ESP32 Cheap Yellow
-Display, built as a collaboration with HeliosPool. It combines an independent
-SHA-256d Stratum miner with balance pages for Cheetahcoin, WojakCoin,
-DigiByte, Bitcoin Cash, and Bitcoin.
+Display. It combines an independent SHA-256d Stratum miner with balance pages
+for Cheetahcoin, WojakCoin, DigiByte, Bitcoin Cash, and Bitcoin.
+
+## Independent Project
+
+HELIOS_HUNTER was not created by HeliosPool and is not an official HeliosPool
+product. I am simply a big fan of HeliosPool and wanted to create something
+for its community.
+
+For support, I can be reached in the `SOLO_HUNTER` channel of the HeliosPool
+Discord server.
 
 Two display versions are included:
 
@@ -75,4 +83,3 @@ embedded in this repository or in a freshly compiled firmware image.
 ## License
 
 HELIOS_HUNTER is distributed under GPL-3.0-or-later. See [LICENSE](LICENSE).
-
