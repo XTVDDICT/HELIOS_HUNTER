@@ -57,6 +57,5 @@ The equivalent fully qualified board name is:
 esp32:esp32:jczn_2432s028r:UploadSpeed=921600,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=4M,PartitionScheme=huge_app,DebugLevel=none,EraseFlash=none,LoopCore=1,EventsCore=1
 ```
 
-GitHub Actions compiles both sketches on every push and makes the resulting
-binary files available as workflow artifacts.
-
+Use Arduino IDE's **Verify/Compile** command to validate the selected sketch
+before exporting or uploading it.
