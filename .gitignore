@@ -1,5 +1,8 @@
 # Arduino output
 build/
+.build/
+.arduino-temp/
+dist/
 *.bin
 *.elf
 *.map
@@ -17,4 +20,3 @@ build/
 .DS_Store
 Thumbs.db
 desktop.ini
-

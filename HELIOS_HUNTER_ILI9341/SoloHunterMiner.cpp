@@ -17,7 +17,7 @@ constexpr size_t MAX_STRATUM_LINE = 12288;
 constexpr uint32_t HASH_BATCH_SIZE = 256;
 constexpr uint32_t AUXILIARY_HASH_BATCH_SIZE = 512;
 constexpr uint32_t HARDWARE_HASH_BATCH_SIZE = 65536;
-constexpr uint8_t HARDWARE_BATCHES_BEFORE_DELAY = 16;
+constexpr uint8_t HARDWARE_BATCHES_BEFORE_DELAY = 1;
 constexpr uint32_t CONNECT_RETRY_MS = 5000;
 constexpr uint32_t HANDSHAKE_TIMEOUT_MS = 15000;
 constexpr uint32_t JOB_TIMEOUT_MS = 180000;
@@ -784,7 +784,7 @@ bool sendSubscribe(Client& client, MiningSession& session) {
   JsonDocument request;
   request["id"] = session.subscribeId;
   request["method"] = "mining.subscribe";
-  request["params"].to<JsonArray>().add("HELIOS_HUNTER/1.0.5");
+  request["params"].to<JsonArray>().add("HELIOS_HUNTER/1.0.6");
   return sendDocument(client, request);
 }
 

@@ -10,10 +10,10 @@ HELIOS_HUNTER was not created by HeliosPool and is not an official HeliosPool pr
 
 For support, I can be reached in the `SOLO_HUNTER` channel of the HeliosPool Discord server.
 
-Two display versions are included:
+Two display versions are available:
 
-- `HELIOS_HUNTER_ILI9341` for ILI9341 panels
-- `HELIOS_HUNTER_ST7789` for ST7789 panels
+- `HELIOS_HUNTER_ILI9341_v1.0.6_merged.bin` for ILI9341 panels
+- `HELIOS_HUNTER_ST7789_v1.0.6_merged.bin` for ST7789 panels
 
 Use only the firmware version that matches the display controller in your CYD.
 
@@ -42,10 +42,10 @@ HELIOS_HUNTER is designed for the:
 
 HELIOS_HUNTER is provided as a ready-to-flash merged ESP32 firmware image. Arduino IDE is **not required** to install the firmware.
 
-Download the merged `.bin` file that matches your display:
+Download the merged `.bin` file that matches your display from the [latest GitHub release](https://github.com/XTVDDICT/HELIOS_HUNTER/releases/latest):
 
-- `HELIOS_HUNTER_ILI9341_merged.bin`
-- `HELIOS_HUNTER_ST7789_merged.bin`
+- `HELIOS_HUNTER_ILI9341_v1.0.6_merged.bin`
+- `HELIOS_HUNTER_ST7789_v1.0.6_merged.bin`
 
 ### Flashing
 
@@ -97,7 +97,7 @@ The source is provided for development, modification, troubleshooting, and commu
 
 ## Balance Data
 
-Balance pages display public explorer data for the configured addresses. They do not represent unpaid pool earnings.
+Balance pages display public network data for the configured addresses. They do not represent unpaid pool earnings.
 
 The firmware checks:
 
@@ -107,23 +107,23 @@ The firmware checks:
 - Bitcoin Cash (BCH)
 - Bitcoin (BTC)
 
-through their public explorer APIs and refreshes periodically.
-
-WJK uses a secondary compatible explorer when its primary service is unavailable.
-
-DigiByte public data may occasionally be delayed by its provider.
+through multiple independent explorer or Electrum sources. The firmware refreshes periodically and automatically tries a fallback when a provider is unavailable. DigiByte public data may occasionally be delayed by its provider.
 
 The balance-increase notification assumes an increase may represent a mined reward. Incoming transfers can also trigger the notification.
 
-## Privacy
+## Release Privacy
 
 Wi-Fi credentials, wallet addresses, and mining settings are entered after flashing and stored in the ESP32's local nonvolatile storage.
 
-They are not embedded in this repository or in a freshly compiled firmware image.
+They are not embedded in this repository or in the released firmware files. Release binaries are built from the public source and checked for personal wallet addresses, Wi-Fi credentials, pool usernames, access tokens, email addresses, and local computer paths before publication.
 
 HELIOS_HUNTER does not require your wallet seed phrase or private keys.
 
 **Never enter a wallet seed phrase or private key into HELIOS_HUNTER. Only public wallet addresses are required for balance tracking.**
+
+## Building From Source
+
+Most users should install the release `.bin` with an ESP32 flasher. Arduino instructions are provided separately in [BUILDING.md](BUILDING.md) only for developers who want to compile the public source themselves.
 
 ## License
 

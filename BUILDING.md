@@ -1,4 +1,8 @@
-# Building and Flashing
+# Building From Source
+
+This document is optional. Normal installation uses a merged `.bin` from the
+[GitHub Releases page](https://github.com/XTVDDICT/HELIOS_HUNTER/releases) and
+an ESP32 flashing program with flash address `0x0`.
 
 ## Select the Sketch
 
