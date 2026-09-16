@@ -13,8 +13,10 @@ struct HeliosSettingsData {
   String stratumPassword = "x";
   bool miningEnabled = false;
   bool flipped = false;
+  bool rearLedEnabled = true;
   uint8_t brightness = 220;
   uint8_t fiatCurrency = 0;
+  uint16_t screenSleepSeconds = 0;
 };
 
 class HeliosSettings {
@@ -27,8 +29,10 @@ class HeliosSettings {
                  String password, bool enabled);
   void setMiningEnabled(bool enabled);
   void setFlipped(bool flipped);
+  void setRearLedEnabled(bool enabled);
   void setBrightness(uint8_t brightness);
   void setFiatCurrency(uint8_t currency);
+  void setScreenSleepSeconds(uint16_t seconds);
 
  private:
   void saveText(const char* key, const String& value);

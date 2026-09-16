@@ -2,9 +2,11 @@
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
+#include <esp_heap_caps.h>
 #include <math.h>
 #include <mbedtls/sha256.h>
 #include <stdlib.h>
@@ -12,12 +14,27 @@
 
 namespace {
 
-constexpr uint32_t REFRESH_INTERVAL_MS = 15UL * 60UL * 1000UL;
+constexpr uint32_t REFRESH_INTERVAL_MS = 5UL * 60UL * 1000UL;
 constexpr uint32_t PRICE_CACHE_MS = 10UL * 60UL * 1000UL;
 constexpr uint32_t REQUEST_TIMEOUT_MS = 12000;
 constexpr uint8_t REQUEST_ATTEMPTS = 2;
 constexpr uint32_t ELECTRUM_TIMEOUT_MS = 6000;
+constexpr uint32_t BALANCE_NETWORK_SETTLE_MS = 20000;
+constexpr uint32_t BETWEEN_COIN_REQUESTS_MS = 5000;
+constexpr size_t MAX_HTTP_PAYLOAD_BYTES = 32768;
+// Only suppress a request when the heap is critically low. TLS can operate
+// with fragmented heap on these CYDs, and each response allocation is checked
+// separately once its actual Content-Length is known.
+constexpr size_t MIN_REQUEST_FREE_HEAP = 24000;
+constexpr size_t MIN_REQUEST_LARGEST_BLOCK = 8192;
 constexpr uint8_t ALL_COINS_MASK = (1U << HELIOS_COIN_COUNT) - 1U;
+constexpr const char* BALANCE_STATE_NAMESPACE = "heliosbal";
+constexpr const char* BALANCE_WALLET_KEYS[HELIOS_COIN_COUNT] = {
+    "wallet0", "wallet1", "wallet2", "wallet3", "wallet4"};
+constexpr const char* BALANCE_VALUE_KEYS[HELIOS_COIN_COUNT] = {
+    "balance0", "balance1", "balance2", "balance3", "balance4"};
+constexpr const char* PENDING_VALUE_KEYS[HELIOS_COIN_COUNT] = {
+    "pending0", "pending1", "pending2", "pending3", "pending4"};
 constexpr const char* PRICE_IDS[HELIOS_COIN_COUNT] = {
     "chta-cheetahcoin", "wjk-wojakcoin", "dgb-digibyte",
     "bch-bitcoin-cash", "btc-bitcoin"};
@@ -26,6 +43,55 @@ struct ElectrumServer {
   const char* host;
   uint16_t port;
 };
+
+bool loadStoredBalanceState(size_t index, const String& wallet,
+                            double& balance, double& pendingIncrease) {
+  balance = 0.0;
+  pendingIncrease = 0.0;
+  if (wallet.isEmpty()) return false;
+
+  Preferences prefs;
+  if (!prefs.begin(BALANCE_STATE_NAMESPACE, true)) return false;
+  bool walletMatches =
+      prefs.getString(BALANCE_WALLET_KEYS[index], "") == wallet;
+  double storedBalance = prefs.getDouble(BALANCE_VALUE_KEYS[index], NAN);
+  double storedPending = prefs.getDouble(PENDING_VALUE_KEYS[index], 0.0);
+  prefs.end();
+
+  if (!walletMatches || !isfinite(storedBalance) || storedBalance < 0.0) {
+    return false;
+  }
+  balance = storedBalance;
+  if (isfinite(storedPending) && storedPending > 0.0) {
+    pendingIncrease = storedPending;
+  }
+  return true;
+}
+
+void saveStoredBalanceState(size_t index, const String& wallet,
+                            double balance, double pendingIncrease) {
+  if (wallet.isEmpty() || !isfinite(balance) || balance < 0.0) return;
+  Preferences prefs;
+  if (!prefs.begin(BALANCE_STATE_NAMESPACE, false)) return;
+  prefs.putString(BALANCE_WALLET_KEYS[index], wallet);
+  prefs.putDouble(BALANCE_VALUE_KEYS[index], balance);
+  if (isfinite(pendingIncrease) && pendingIncrease > 0.0) {
+    prefs.putDouble(PENDING_VALUE_KEYS[index], pendingIncrease);
+  } else {
+    prefs.remove(PENDING_VALUE_KEYS[index]);
+  }
+  prefs.end();
+}
+
+void clearStoredPendingIncrease(size_t index, const String& wallet) {
+  if (wallet.isEmpty()) return;
+  Preferences prefs;
+  if (!prefs.begin(BALANCE_STATE_NAMESPACE, false)) return;
+  if (prefs.getString(BALANCE_WALLET_KEYS[index], "") == wallet) {
+    prefs.remove(PENDING_VALUE_KEYS[index]);
+  }
+  prefs.end();
+}
 
 constexpr ElectrumServer CHTA_ELECTRUM_SERVERS[] = {
     {"electrum.shorelinecrypto.com", 10007},
@@ -45,8 +111,22 @@ bool parseNumber(String payload, double& value) {
   return end != payload.c_str() && *end == '\0' && isfinite(value) && value >= 0;
 }
 
+bool requestMemoryAvailable(String& error) {
+  const size_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  const size_t largestBlock =
+      heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (freeHeap >= MIN_REQUEST_FREE_HEAP &&
+      largestBlock >= MIN_REQUEST_LARGEST_BLOCK) {
+    return true;
+  }
+  error = "LOW MEMORY";
+  return false;
+}
+
 bool getPayloadOnce(const String& url, bool secure, String& payload,
-                    String& error) {
+                     String& error) {
+  if (!requestMemoryAvailable(error)) return false;
+
   HTTPClient http;
   http.setConnectTimeout(8000);
   http.setTimeout(REQUEST_TIMEOUT_MS);
@@ -80,7 +160,25 @@ bool getPayloadOnce(const String& url, bool secure, String& payload,
     http.end();
     return false;
   }
+  const int responseSize = http.getSize();
+  if (responseSize > static_cast<int>(MAX_HTTP_PAYLOAD_BYTES)) {
+    error = "RESPONSE TOO LARGE";
+    http.end();
+    return false;
+  }
+  if (responseSize > 0 &&
+      !payload.reserve(static_cast<size_t>(responseSize) + 1U)) {
+    error = "LOW MEMORY";
+    http.end();
+    return false;
+  }
   payload = http.getString();
+  if (payload.length() > MAX_HTTP_PAYLOAD_BYTES) {
+    payload = "";
+    error = "RESPONSE TOO LARGE";
+    http.end();
+    return false;
+  }
   http.end();
   return true;
 }
@@ -389,8 +487,11 @@ void HeliosBalances::begin(HeliosSettings* settings) {
   if (!mutex_) return;
   syncWallets();
   pendingMask_ = ALL_COINS_MASK;
+  // TLS calculations can run longer than the core-0 idle watchdog deadline.
+  // Share priority with idle and the helper miner so tick preemption still
+  // services both, even while a library call is CPU-bound.
   BaseType_t created =
-      xTaskCreatePinnedToCore(taskEntry, "heliosBalance", 12288, this, 1,
+      xTaskCreatePinnedToCore(taskEntry, "heliosBalance", 14336, this, tskIDLE_PRIORITY,
                               &task_, 0);
   if (created != pdPASS) {
     task_ = nullptr;
@@ -400,6 +501,30 @@ void HeliosBalances::begin(HeliosSettings* settings) {
     }
     xSemaphoreGive(mutex_);
   }
+}
+
+bool HeliosBalances::setFetchEnabled(bool enabled) {
+  if (!mutex_ || !task_) return false;
+  xSemaphoreTake(mutex_, portMAX_DELAY);
+  if (fetchEnabled_ != enabled) {
+    fetchEnabled_ = enabled;
+    fetchStateSinceMs_ = millis();
+    if (enabled) pendingMask_ |= ALL_COINS_MASK;
+  }
+  xSemaphoreGive(mutex_);
+  xTaskNotifyGive(task_);
+  return true;
+}
+
+HeliosBalanceFetchState HeliosBalances::fetchState() const {
+  HeliosBalanceFetchState state;
+  if (!mutex_) return state;
+  xSemaphoreTake(mutex_, portMAX_DELAY);
+  state.enabled = fetchEnabled_;
+  state.active = fetchActive_;
+  state.sinceMs = fetchStateSinceMs_;
+  xSemaphoreGive(mutex_);
+  return state;
 }
 
 void HeliosBalances::syncWallets() {
@@ -416,6 +541,20 @@ void HeliosBalances::syncWallets() {
       snapshots_[i].priceCad = previous.priceCad;
       snapshots_[i].priceGbp = previous.priceGbp;
       snapshots_[i].pricesUpdatedAt = previous.pricesUpdatedAt;
+      double storedBalance = 0.0;
+      double pendingIncrease = 0.0;
+      if (loadStoredBalanceState(i, wallet, storedBalance, pendingIncrease)) {
+        snapshots_[i].baselineReady = true;
+        snapshots_[i].balance = storedBalance;
+        if (pendingIncrease > 0.0) {
+          snapshots_[i].increaseAmount = pendingIncrease;
+          snapshots_[i].increaseSequence = ++increaseSequence_;
+          if (increaseSequence_ == 0) {
+            increaseSequence_ = 1;
+            snapshots_[i].increaseSequence = increaseSequence_;
+          }
+        }
+      }
       snapshots_[i].status = wallet.isEmpty() ? "NOT SET" : "QUEUED";
     }
   }
@@ -449,6 +588,19 @@ void HeliosBalances::requestRefresh(HeliosCoin coin) {
   if (task_) xTaskNotifyGive(task_);
 }
 
+void HeliosBalances::acknowledgeIncrease(HeliosCoin coin,
+                                         uint32_t sequence) {
+  if (!mutex_ || sequence == 0) return;
+  size_t index = heliosCoinIndex(coin);
+  xSemaphoreTake(mutex_, portMAX_DELAY);
+  if (snapshots_[index].increaseSequence == sequence) {
+    snapshots_[index].increaseAmount = 0.0;
+    snapshots_[index].increaseSequence = 0;
+    clearStoredPendingIncrease(index, wallets_[index]);
+  }
+  xSemaphoreGive(mutex_);
+}
+
 HeliosBalanceSnapshot HeliosBalances::get(HeliosCoin coin) const {
   HeliosBalanceSnapshot result;
   if (!mutex_) return result;
@@ -463,9 +615,20 @@ void HeliosBalances::taskEntry(void* argument) {
 }
 
 void HeliosBalances::taskLoop() {
+  uint32_t wifiReadyAt = 0;
   for (;;) {
+    if (!fetchState().enabled) {
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+      continue;
+    }
     if (WiFi.status() != WL_CONNECTED) {
+      wifiReadyAt = 0;
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+      continue;
+    }
+    if (wifiReadyAt == 0) wifiReadyAt = millis();
+    if ((uint32_t)(millis() - wifiReadyAt) < BALANCE_NETWORK_SETTLE_MS) {
+      vTaskDelay(pdMS_TO_TICKS(1000));
       continue;
     }
 
@@ -479,7 +642,7 @@ void HeliosBalances::taskLoop() {
     int next = -1;
     String wallet;
     xSemaphoreTake(mutex_, portMAX_DELAY);
-    for (size_t i = 0; i < HELIOS_COIN_COUNT; ++i) {
+    for (size_t i = 0; fetchEnabled_ && i < HELIOS_COIN_COUNT; ++i) {
       if (pendingMask_ & (1U << i)) {
         pendingMask_ &= ~(1U << i);
         next = static_cast<int>(i);
@@ -487,6 +650,10 @@ void HeliosBalances::taskLoop() {
         break;
       }
     }
+    // Finish a selected coin refresh before acknowledging a diagnostic pause;
+    // suspending inside HTTP/TLS or storage code could leave a lock held.
+    fetchActive_ = next >= 0;
+    if (fetchActive_) fetchStateSinceMs_ = millis();
     xSemaphoreGive(mutex_);
 
     if (next < 0) {
@@ -495,7 +662,11 @@ void HeliosBalances::taskLoop() {
     }
 
     refreshCoin(static_cast<HeliosCoin>(next), wallet);
-    vTaskDelay(pdMS_TO_TICKS(250));
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    fetchActive_ = false;
+    fetchStateSinceMs_ = millis();
+    xSemaphoreGive(mutex_);
+    vTaskDelay(pdMS_TO_TICKS(BETWEEN_COIN_REQUESTS_MS));
   }
 }
 
@@ -514,6 +685,8 @@ void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet) {
   String priceError;
   bool balanceOk = !wallet.isEmpty() &&
                    fetchBalance(coin, wallet, balance, balanceError);
+  bool persistBalance = false;
+  double pendingIncrease = 0.0;
   xSemaphoreTake(mutex_, portMAX_DELAY);
   bool pricesOk = snapshots_[index].pricesAvailable &&
                   millis() - snapshots_[index].pricesUpdatedAt <
@@ -524,7 +697,9 @@ void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet) {
     gbp = snapshots_[index].priceGbp;
   }
   xSemaphoreGive(mutex_);
-  if (!pricesOk) pricesOk = fetchPrices(coin, usd, cad, gbp, priceError);
+  if (!wallet.isEmpty() && !pricesOk) {
+    pricesOk = fetchPrices(coin, usd, cad, gbp, priceError);
+  }
   xSemaphoreTake(mutex_, portMAX_DELAY);
   if (wallets_[index] != wallet) {
     xSemaphoreGive(mutex_);
@@ -534,19 +709,27 @@ void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet) {
   snapshots_[index].available = balanceOk;
   snapshots_[index].pricesAvailable = pricesOk;
   if (balanceOk) {
-    bool increased = snapshots_[index].updatedAt != 0 &&
-                     balance > snapshots_[index].balance + 0.000000001;
+    double previousBalance = snapshots_[index].balance;
+    bool hadBaseline = snapshots_[index].baselineReady;
+    bool increased = hadBaseline &&
+                     balance > previousBalance + 0.000000001;
     if (increased) {
-      snapshots_[index].increaseAmount = balance - snapshots_[index].balance;
+      snapshots_[index].increaseAmount = balance - previousBalance;
       snapshots_[index].increaseSequence = ++increaseSequence_;
       if (increaseSequence_ == 0) {
         increaseSequence_ = 1;
         snapshots_[index].increaseSequence = increaseSequence_;
       }
     }
+    persistBalance = !hadBaseline ||
+                     fabs(balance - previousBalance) > 0.000000001;
+    snapshots_[index].baselineReady = true;
     snapshots_[index].balance = balance;
     snapshots_[index].updatedAt = millis();
     snapshots_[index].status = coin == HeliosCoin::DGB ? "CACHED (UP TO 6H)" : "UPDATED";
+    if (snapshots_[index].increaseSequence != 0) {
+      pendingIncrease = snapshots_[index].increaseAmount;
+    }
   } else if (wallet.isEmpty()) {
     snapshots_[index].balance = 0;
     snapshots_[index].status = "NOT SET";
@@ -561,6 +744,9 @@ void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet) {
     snapshots_[index].pricesUpdatedAt = millis();
   }
   xSemaphoreGive(mutex_);
+  if (balanceOk && persistBalance) {
+    saveStoredBalanceState(index, wallet, balance, pendingIncrease);
+  }
 }
 
 bool HeliosBalances::fetchBalance(HeliosCoin coin, const String& wallet,

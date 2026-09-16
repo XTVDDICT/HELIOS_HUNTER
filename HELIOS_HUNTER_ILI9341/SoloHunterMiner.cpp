@@ -15,12 +15,18 @@ namespace {
 constexpr size_t MAX_MERKLE_BRANCHES = 32;
 constexpr size_t MAX_STRATUM_LINE = 12288;
 constexpr uint32_t HASH_BATCH_SIZE = 256;
-constexpr uint32_t AUXILIARY_HASH_BATCH_SIZE = 512;
+constexpr uint32_t AUXILIARY_HASH_BATCH_SIZE = 1024;
+constexpr uint8_t AUXILIARY_BATCHES_BEFORE_DELAY = 16;
 constexpr uint32_t HARDWARE_HASH_BATCH_SIZE = 65536;
-constexpr uint8_t HARDWARE_BATCHES_BEFORE_DELAY = 1;
+constexpr uint8_t HARDWARE_BATCHES_BEFORE_DELAY = 16;
+// Run the software helper below all UI/network work and block it every batch.
+// Its nonce range is disjoint from the hardware engine, so these are real
+// additional attempts rather than duplicated hashrate.
+constexpr bool ENABLE_AUXILIARY_MINING = true;
 constexpr uint32_t CONNECT_RETRY_MS = 5000;
 constexpr uint32_t HANDSHAKE_TIMEOUT_MS = 15000;
-constexpr uint32_t JOB_TIMEOUT_MS = 180000;
+constexpr uint32_t NO_JOB_TIMEOUT_MS = 10UL * 60UL * 1000UL;
+constexpr uint32_t POOL_SILENCE_TIMEOUT_MS = 30UL * 60UL * 1000UL;
 constexpr uint32_t HASHRATE_WINDOW_MS = 1000;
 constexpr uint32_t HARDWARE_RETRY_MS = 5000;
 constexpr float HASHRATE_SMOOTHING = 0.20f;
@@ -30,7 +36,7 @@ constexpr double DIFF_ONE_TARGET =
 constexpr uint32_t SHA256_INITIAL_STATE[8] = {
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-constexpr uint32_t SHA256_ROUND_CONSTANTS[64] = {
+DRAM_ATTR const uint32_t SHA256_ROUND_CONSTANTS[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b,
     0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
     0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7,
@@ -136,7 +142,7 @@ AuxiliaryMiningWork auxiliaryWork;
 uint32_t auxiliaryHashesPending = 0;
 SoloHunterMiningConfig activeConfig;
 SoloHunterMiningStats activeStats;
-uint32_t configRevision = 0;
+volatile uint32_t configRevision = 0;
 uint32_t statsStartedAt = 0;
 
 void lockState() {
@@ -153,10 +159,13 @@ void setStatus(const String& status) {
   unlockState();
 }
 
-void setHashTelemetry(float hashrateKh, uint64_t totalHashes,
+void setHashTelemetry(float hashrateKh, float primaryHashrateKh,
+                      float auxiliaryHashrateKh, uint64_t totalHashes,
                       bool hardwareSha) {
   lockState();
   activeStats.hashrateKh = hashrateKh;
+  activeStats.primaryHashrateKh = primaryHashrateKh;
+  activeStats.auxiliaryHashrateKh = auxiliaryHashrateKh;
   activeStats.totalHashes = totalHashes;
   activeStats.hardwareSha = hardwareSha;
   unlockState();
@@ -165,6 +174,10 @@ void setHashTelemetry(float hashrateKh, uint64_t totalHashes,
 void setHashrate(float hashrateKh) {
   lockState();
   activeStats.hashrateKh = hashrateKh;
+  if (hashrateKh <= 0.0f) {
+    activeStats.primaryHashrateKh = 0.0f;
+    activeStats.auxiliaryHashrateKh = 0.0f;
+  }
   unlockState();
 }
 
@@ -203,6 +216,12 @@ void recordBlockFound() {
   unlockState();
 }
 
+void recordPoolReconnect() {
+  lockState();
+  activeStats.poolReconnects++;
+  unlockState();
+}
+
 void setPendingShares(uint32_t pendingShares) {
   lockState();
   activeStats.pendingShares = pendingShares;
@@ -218,6 +237,8 @@ void setHardwareSha(bool hardwareSha) {
 void resetRunStats(bool hardwareSha) {
   lockState();
   activeStats.hashrateKh = 0.0f;
+  activeStats.primaryHashrateKh = 0.0f;
+  activeStats.auxiliaryHashrateKh = 0.0f;
   activeStats.totalHashes = 0;
   activeStats.submittedShares = 0;
   activeStats.pendingShares = 0;
@@ -239,6 +260,12 @@ SoloHunterMiningConfig copyConfig(uint32_t& revision) {
   revision = configRevision;
   unlockState();
   return copy;
+}
+
+uint32_t currentConfigRevision() {
+  // Aligned 32-bit reads are atomic on ESP32. The full configuration is still
+  // copied under the mutex only after this inexpensive change check fires.
+  return configRevision;
 }
 
 String lowerCopy(String value) {
@@ -356,22 +383,33 @@ void storeBigEndian32(uint8_t* output, uint32_t value) {
   output[3] = (uint8_t)value;
 }
 
-inline uint32_t rotateRight32(uint32_t value, uint8_t count) {
+template <uint8_t Count>
+__attribute__((always_inline)) inline uint32_t rotateRight32(uint32_t value) {
+#if defined(__XTENSA__)
+  uint32_t result;
+  __asm__ __volatile__("ssai %1\n\tsrc %0, %2, %2"
+                       : "=r"(result)
+                       : "i"(Count), "r"(value));
+  return result;
+#else
+  constexpr uint8_t count = Count;
   return (value >> count) | (value << (32 - count));
+#endif
 }
 
 void sha256Initialize(uint32_t state[8]) {
   memcpy(state, SHA256_INITIAL_STATE, sizeof(SHA256_INITIAL_STATE));
 }
 
-__attribute__((optimize("O3"))) void sha256CompressPrepared(
+IRAM_ATTR __attribute__((optimize("O3"))) void sha256CompressPrepared(
     uint32_t state[8], uint32_t schedule[64]) {
+#pragma GCC unroll 48
   for (size_t i = 16; i < 64; ++i) {
-    uint32_t s0 = rotateRight32(schedule[i - 15], 7) ^
-                  rotateRight32(schedule[i - 15], 18) ^
+    uint32_t s0 = rotateRight32<7>(schedule[i - 15]) ^
+                  rotateRight32<18>(schedule[i - 15]) ^
                   (schedule[i - 15] >> 3);
-    uint32_t s1 = rotateRight32(schedule[i - 2], 17) ^
-                  rotateRight32(schedule[i - 2], 19) ^
+    uint32_t s1 = rotateRight32<17>(schedule[i - 2]) ^
+                  rotateRight32<19>(schedule[i - 2]) ^
                   (schedule[i - 2] >> 10);
     schedule[i] =
         schedule[i - 16] + s0 + schedule[i - 7] + s1;
@@ -386,15 +424,16 @@ __attribute__((optimize("O3"))) void sha256CompressPrepared(
   uint32_t g = state[6];
   uint32_t h = state[7];
 
+#pragma GCC unroll 64
   for (size_t i = 0; i < 64; ++i) {
-    uint32_t sum1 = rotateRight32(e, 6) ^ rotateRight32(e, 11) ^
-                    rotateRight32(e, 25);
-    uint32_t choose = (e & f) ^ (~e & g);
+    uint32_t sum1 = rotateRight32<6>(e) ^ rotateRight32<11>(e) ^
+                    rotateRight32<25>(e);
+    uint32_t choose = g ^ (e & (f ^ g));
     uint32_t temp1 =
         h + sum1 + choose + SHA256_ROUND_CONSTANTS[i] + schedule[i];
-    uint32_t sum0 = rotateRight32(a, 2) ^ rotateRight32(a, 13) ^
-                    rotateRight32(a, 22);
-    uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+    uint32_t sum0 = rotateRight32<2>(a) ^ rotateRight32<13>(a) ^
+                    rotateRight32<22>(a);
+    uint32_t majority = (a & b) | (c & (a | b));
     uint32_t temp2 = sum0 + majority;
 
     h = g;
@@ -425,29 +464,38 @@ void sha256CompressBlock(uint32_t state[8], const uint8_t block[64],
   sha256CompressPrepared(state, schedule);
 }
 
-__attribute__((optimize("O3"))) void sha256d80FromMidstate(
-    const uint32_t midstate[8], const uint8_t headerTail[16],
-    uint8_t output[32], uint32_t schedule[64]) {
+__attribute__((optimize("O3"))) void sha256d80WordsFromMidstate(
+    const uint32_t midstate[8], const uint32_t headerTailWords[4],
+    uint32_t outputWords[8], uint32_t schedule[64]) {
   uint32_t firstHash[8];
   memcpy(firstHash, midstate, sizeof(firstHash));
-  for (size_t i = 0; i < 4; ++i) {
-    schedule[i] = loadBigEndian32(headerTail + i * 4);
-  }
+  memcpy(schedule, headerTailWords, 4 * sizeof(uint32_t));
   schedule[4] = 0x80000000;
   memset(schedule + 5, 0, 10 * sizeof(uint32_t));
   schedule[15] = 80 * 8;
   sha256CompressPrepared(firstHash, schedule);
 
-  uint32_t secondHash[8];
-  sha256Initialize(secondHash);
+  sha256Initialize(outputWords);
   memcpy(schedule, firstHash, sizeof(firstHash));
   schedule[8] = 0x80000000;
   memset(schedule + 9, 0, 6 * sizeof(uint32_t));
   schedule[15] = 32 * 8;
-  sha256CompressPrepared(secondHash, schedule);
+  sha256CompressPrepared(outputWords, schedule);
+}
+
+__attribute__((optimize("O3"))) void sha256d80FromMidstate(
+    const uint32_t midstate[8], const uint8_t headerTail[16],
+    uint8_t output[32], uint32_t schedule[64]) {
+  uint32_t headerTailWords[4];
+  uint32_t outputWords[8];
+  for (size_t i = 0; i < 4; ++i) {
+    headerTailWords[i] = loadBigEndian32(headerTail + i * 4);
+  }
+  sha256d80WordsFromMidstate(midstate, headerTailWords, outputWords,
+                             schedule);
 
   for (size_t i = 0; i < 8; ++i) {
-    storeBigEndian32(output + i * 4, secondHash[i]);
+    storeBigEndian32(output + i * 4, outputWords[i]);
   }
 }
 
@@ -685,8 +733,10 @@ uint32_t drainAuxiliaryHashes() {
 
 void auxiliaryMiningTask(void*) {
   uint32_t schedule[64];
-  uint8_t headerTail[16];
+  uint32_t headerTailWords[4];
+  uint32_t hashWords[8];
   uint8_t hash[32];
+  uint8_t batchesBeforeDelay = 0;
 
   for (;;) {
     AuxiliaryMiningBatch batch;
@@ -695,27 +745,44 @@ void auxiliaryMiningTask(void*) {
       continue;
     }
 
-    memcpy(headerTail, batch.headerTail, sizeof(headerTail));
+    for (size_t i = 0; i < 4; ++i) {
+      headerTailWords[i] = loadBigEndian32(batch.headerTail + i * 4);
+    }
+    const uint16_t candidateMask =
+        hardwareLeadingZeroMask(batch.shareTarget) &
+        hardwareLeadingZeroMask(batch.blockTarget);
     uint32_t nonceSwapped = batch.firstNonceSwapped;
     for (uint32_t i = 0; i < AUXILIARY_HASH_BATCH_SIZE; ++i) {
-      uint32_t nonce = __builtin_bswap32(nonceSwapped++);
-      headerTail[12] = (uint8_t)nonce;
-      headerTail[13] = (uint8_t)(nonce >> 8);
-      headerTail[14] = (uint8_t)(nonce >> 16);
-      headerTail[15] = (uint8_t)(nonce >> 24);
-      sha256d80FromMidstate(batch.midstate, headerTail, hash, schedule);
+      const uint32_t thisNonceSwapped = nonceSwapped++;
+      headerTailWords[3] = thisNonceSwapped;
+      sha256d80WordsFromMidstate(batch.midstate, headerTailWords, hashWords,
+                                 schedule);
+
+      const uint16_t highWord =
+          __builtin_bswap16((uint16_t)hashWords[7]);
+      if ((highWord & candidateMask) != 0) continue;
+
+      for (size_t word = 0; word < 8; ++word) {
+        storeBigEndian32(hash + word * 4, hashWords[word]);
+      }
 
       if (hashMeetsTarget(hash, batch.shareTarget) ||
           hashMeetsTarget(hash, batch.blockTarget)) {
         AuxiliaryCandidate candidate;
         candidate.generation = batch.generation;
-        candidate.nonce = nonce;
+        candidate.nonce = __builtin_bswap32(thisNonceSwapped);
         memcpy(candidate.hash, hash, sizeof(candidate.hash));
         xQueueSend(auxiliaryCandidateQueue, &candidate, 0);
       }
     }
     recordAuxiliaryHashes(AUXILIARY_HASH_BATCH_SIZE);
-    vTaskDelay(pdMS_TO_TICKS(1));
+    if (++batchesBeforeDelay >= AUXILIARY_BATCHES_BEFORE_DELAY) {
+      batchesBeforeDelay = 0;
+      vTaskDelay(pdMS_TO_TICKS(1));
+    } else {
+      // The core-0 idle task has the same priority and gets watchdog time here.
+      taskYIELD();
+    }
   }
 }
 
@@ -784,7 +851,7 @@ bool sendSubscribe(Client& client, MiningSession& session) {
   JsonDocument request;
   request["id"] = session.subscribeId;
   request["method"] = "mining.subscribe";
-  request["params"].to<JsonArray>().add("HELIOS_HUNTER/1.0.6");
+  request["params"].to<JsonArray>().add("HELIOS_HUNTER/1.0.7");
   return sendDocument(client, request);
 }
 
@@ -1024,9 +1091,11 @@ bool readPoolMessages(Client& client, MiningSession& session,
     if (ch == '\r') continue;
     if (ch == '\n') {
       if (!session.rxLine.isEmpty()) {
-        String line = session.rxLine;
+        if (!processLine(session.rxLine, client, session, config)) {
+          session.rxLine = "";
+          return false;
+        }
         session.rxLine = "";
-        if (!processLine(line, client, session, config)) return false;
       }
       continue;
     }
@@ -1041,6 +1110,7 @@ bool readPoolMessages(Client& client, MiningSession& session,
 
 void stopClient(Client*& client, WiFiClient& tcpClient, WiFiClientSecure& tlsClient,
                 MiningSession& session) {
+  if (session.connected) recordPoolReconnect();
   if (client != nullptr) client->stop();
   tcpClient.stop();
   tlsClient.stop();
@@ -1129,21 +1199,32 @@ void miningTask(void*) {
   uint32_t hardwareRetryAt = 0;
   uint32_t hashrateStartedAt = millis();
   uint32_t hashesInWindow = 0;
+  uint32_t primaryHashesInWindow = 0;
+  uint32_t auxiliaryHashesInWindow = 0;
   float smoothedHashrateKh = 0.0f;
+  float smoothedPrimaryHashrateKh = 0.0f;
+  float smoothedAuxiliaryHashrateKh = 0.0f;
   uint64_t totalHashes = 0;
   uint8_t hardwareBatchesBeforeDelay = 0;
+  SoloHunterMiningConfig config;
+  PoolEndpoint endpoint;
 
   for (;;) {
-    uint32_t latestRevision = 0;
-    SoloHunterMiningConfig config = copyConfig(latestRevision);
+    uint32_t latestRevision = currentConfigRevision();
     if (latestRevision != appliedRevision) {
+      config = copyConfig(latestRevision);
+      endpoint = parseEndpoint(config);
       stopClient(client, tcpClient, tlsClient, session);
       memset(session.bestHash, 0xFF, sizeof(session.bestHash));
       appliedRevision = latestRevision;
       reconnectAt = 0;
       hardwareRetryAt = 0;
       hashesInWindow = 0;
+      primaryHashesInWindow = 0;
+      auxiliaryHashesInWindow = 0;
       smoothedHashrateKh = 0.0f;
+      smoothedPrimaryHashrateKh = 0.0f;
+      smoothedAuxiliaryHashrateKh = 0.0f;
       totalHashes = 0;
       hardwareBatchesBeforeDelay = 0;
       hashrateStartedAt = millis();
@@ -1156,7 +1237,6 @@ void miningTask(void*) {
       continue;
     }
 
-    PoolEndpoint endpoint = parseEndpoint(config);
     if (endpoint.host.isEmpty() || config.username.isEmpty()) {
       setStatus("CONFIG REQUIRED");
       vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1198,15 +1278,19 @@ void miningTask(void*) {
       reconnectAt = millis() + CONNECT_RETRY_MS;
       continue;
     }
-    if (session.job.valid &&
-        (uint32_t)(now - session.lastJobAt) > JOB_TIMEOUT_MS) {
-      setStatus("JOB TIMEOUT");
+    // A valid Stratum job remains usable until the pool replaces it. Quiet
+    // pools can legitimately keep one job for many minutes, so only tear down
+    // a connection that has delivered no messages at all for a long period.
+    if (session.job.valid && session.lastPoolMessageAt != 0 &&
+        (uint32_t)(now - session.lastPoolMessageAt) >
+            POOL_SILENCE_TIMEOUT_MS) {
+      setStatus("POOL SILENT");
       stopClient(client, tcpClient, tlsClient, session);
       reconnectAt = millis() + CONNECT_RETRY_MS;
       continue;
     }
     if (session.authorized && !session.job.valid &&
-        (uint32_t)(now - session.connectedAt) > JOB_TIMEOUT_MS) {
+        (uint32_t)(now - session.connectedAt) > NO_JOB_TIMEOUT_MS) {
       setStatus("NO JOB");
       stopClient(client, tcpClient, tlsClient, session);
       reconnectAt = millis() + CONNECT_RETRY_MS;
@@ -1220,6 +1304,7 @@ void miningTask(void*) {
 
     uint32_t auxiliaryHashes = drainAuxiliaryHashes();
     hashesInWindow += auxiliaryHashes;
+    auxiliaryHashesInWindow += auxiliaryHashes;
     totalHashes += auxiliaryHashes;
 
     if (!hardwareShaAvailable &&
@@ -1227,7 +1312,6 @@ void miningTask(void*) {
       if (soloHunterSha256Begin()) {
         hardwareShaAvailable = true;
         prepareMidstate(session);
-        smoothedHashrateKh = 0.0f;
         setHardwareSha(true);
         setStatus("HASHING");
       } else {
@@ -1253,19 +1337,26 @@ void miningTask(void*) {
 
       if (usedHardware) {
         hashesInWindow += result.hashes;
+        primaryHashesInWindow += result.hashes;
         totalHashes += result.hashes;
         if (result.candidate) {
             uint8_t verifiedHash[32];
             if (!hashHeaderNonce(session, result.nonce, verifiedHash) ||
                 memcmp(result.hash, verifiedHash, sizeof(verifiedHash)) != 0) {
-              hardwareShaAvailable = false;
-              session.hardwareReady = false;
-              smoothedHashrateKh = 0.0f;
-              setHardwareSha(false);
               session.job.nextNonce =
                   __builtin_bswap32(session.hardwareNonceSwapped);
-              hardwareRetryAt = millis() + 1000U;
-              setStatus("SHA RETRY");
+              if (soloHunterSha256Recover()) {
+                hardwareShaAvailable = true;
+                prepareMidstate(session);
+                setHardwareSha(true);
+                setStatus("HASHING");
+              } else {
+                hardwareShaAvailable = false;
+                session.hardwareReady = false;
+                setHardwareSha(false);
+                hardwareRetryAt = millis() + HARDWARE_RETRY_MS;
+                setStatus("SHA RETRY");
+              }
             } else {
               memcpy(hash, verifiedHash, sizeof(hash));
               if (hashIsBetter(hash, session.bestHash)) {
@@ -1297,6 +1388,7 @@ void miningTask(void*) {
           break;
         }
         hashesInWindow++;
+        primaryHashesInWindow++;
         totalHashes++;
         if (hashIsBetter(hash, session.bestHash)) {
           memcpy(session.bestHash, hash, sizeof(session.bestHash));
@@ -1323,20 +1415,38 @@ void miningTask(void*) {
     if (elapsed >= HASHRATE_WINDOW_MS) {
       float sampleHashrateKh =
           elapsed > 0 ? (float)hashesInWindow / (float)elapsed : 0.0f;
+      float samplePrimaryHashrateKh =
+          elapsed > 0 ? (float)primaryHashesInWindow / (float)elapsed : 0.0f;
+      float sampleAuxiliaryHashrateKh =
+          elapsed > 0 ? (float)auxiliaryHashesInWindow / (float)elapsed : 0.0f;
       if (smoothedHashrateKh <= 0.0f) {
         smoothedHashrateKh = sampleHashrateKh;
+        smoothedPrimaryHashrateKh = samplePrimaryHashrateKh;
+        smoothedAuxiliaryHashrateKh = sampleAuxiliaryHashrateKh;
       } else {
         smoothedHashrateKh +=
             (sampleHashrateKh - smoothedHashrateKh) * HASHRATE_SMOOTHING;
+        smoothedPrimaryHashrateKh +=
+            (samplePrimaryHashrateKh - smoothedPrimaryHashrateKh) *
+            HASHRATE_SMOOTHING;
+        smoothedAuxiliaryHashrateKh +=
+            (sampleAuxiliaryHashrateKh - smoothedAuxiliaryHashrateKh) *
+            HASHRATE_SMOOTHING;
       }
-      setHashTelemetry(smoothedHashrateKh, totalHashes, hardwareShaAvailable);
+      setHashTelemetry(smoothedHashrateKh, smoothedPrimaryHashrateKh,
+                       smoothedAuxiliaryHashrateKh, totalHashes,
+                       hardwareShaAvailable);
       hashesInWindow = 0;
+      primaryHashesInWindow = 0;
+      auxiliaryHashesInWindow = 0;
       hashrateStartedAt = now;
     }
 
     if (usedHardware) {
       if (++hardwareBatchesBeforeDelay >= HARDWARE_BATCHES_BEFORE_DELAY) {
         hardwareBatchesBeforeDelay = 0;
+        // Let the core-1 idle task service its watchdog. At 16 full hardware
+        // batches this costs roughly one tick per second, not one per hash.
         vTaskDelay(pdMS_TO_TICKS(1));
       } else {
         taskYIELD();
@@ -1356,10 +1466,10 @@ void soloHunterMinerBegin(const SoloHunterMiningConfig& config) {
     auxiliaryCandidateQueue = xQueueCreate(8, sizeof(AuxiliaryCandidate));
   }
   soloHunterMinerConfigure(config);
-  if (auxiliaryMinerTaskHandle == nullptr &&
+  if (ENABLE_AUXILIARY_MINING && auxiliaryMinerTaskHandle == nullptr &&
       auxiliaryCandidateQueue != nullptr) {
     BaseType_t created = xTaskCreatePinnedToCore(
-        auxiliaryMiningTask, "helios-miner0", 4096, nullptr, 1,
+        auxiliaryMiningTask, "helios-miner0", 6144, nullptr, 0,
         &auxiliaryMinerTaskHandle, 0);
     if (created != pdPASS) auxiliaryMinerTaskHandle = nullptr;
   }

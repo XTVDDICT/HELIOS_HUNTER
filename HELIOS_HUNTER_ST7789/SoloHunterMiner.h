@@ -13,12 +13,15 @@ struct SoloHunterMiningConfig {
 
 struct SoloHunterMiningStats {
   float hashrateKh = 0.0f;
+  float primaryHashrateKh = 0.0f;
+  float auxiliaryHashrateKh = 0.0f;
   uint64_t totalHashes = 0;
   uint32_t submittedShares = 0;
   uint32_t pendingShares = 0;
   uint32_t acceptedShares = 0;
   uint32_t rejectedShares = 0;
   uint32_t blocksFound = 0;
+  uint32_t poolReconnects = 0;
   uint32_t uptimeSeconds = 0;
   double bestDifficulty = 0.0;
   double poolDifficulty = 0.0;

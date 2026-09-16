@@ -18,6 +18,20 @@ String cleaned(String value, size_t maximumLength) {
   return value;
 }
 
+uint16_t cleanedSleepSeconds(uint16_t seconds) {
+  switch (seconds) {
+    case 0:
+    case 30:
+    case 60:
+    case 300:
+    case 900:
+    case 1800:
+      return seconds;
+    default:
+      return 0;
+  }
+}
+
 }  // namespace
 
 void HeliosSettings::begin() {
@@ -43,8 +57,11 @@ void HeliosSettings::begin() {
   data_.stratumPassword = prefs.getString("pass", "x");
   data_.miningEnabled = prefs.getBool("enabled", false);
   data_.flipped = prefs.getBool("flipped", false);
+  data_.rearLedEnabled = prefs.getBool("rearled", true);
   data_.brightness = prefs.getUChar("bright", 220);
   data_.fiatCurrency = prefs.getUChar("currency", 0);
+  data_.screenSleepSeconds =
+      cleanedSleepSeconds(prefs.getUShort("sleeptime", 0));
   if (data_.fiatCurrency > 2) data_.fiatCurrency = 0;
   prefs.end();
 }
@@ -109,6 +126,14 @@ void HeliosSettings::setFlipped(bool flipped) {
   prefs.end();
 }
 
+void HeliosSettings::setRearLedEnabled(bool enabled) {
+  data_.rearLedEnabled = enabled;
+  Preferences prefs;
+  prefs.begin(NAMESPACE_NAME, false);
+  prefs.putBool("rearled", enabled);
+  prefs.end();
+}
+
 void HeliosSettings::setBrightness(uint8_t brightness) {
   data_.brightness = brightness;
   Preferences prefs;
@@ -122,5 +147,13 @@ void HeliosSettings::setFiatCurrency(uint8_t currency) {
   Preferences prefs;
   prefs.begin(NAMESPACE_NAME, false);
   prefs.putUChar("currency", data_.fiatCurrency);
+  prefs.end();
+}
+
+void HeliosSettings::setScreenSleepSeconds(uint16_t seconds) {
+  data_.screenSleepSeconds = cleanedSleepSeconds(seconds);
+  Preferences prefs;
+  prefs.begin(NAMESPACE_NAME, false);
+  prefs.putUShort("sleeptime", data_.screenSleepSeconds);
   prefs.end();
 }

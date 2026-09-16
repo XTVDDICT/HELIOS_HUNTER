@@ -18,6 +18,8 @@ constexpr uint16_t HELIOS_GREEN = 0x47E9;
 constexpr uint16_t HELIOS_AMBER = 0xFCC0;
 constexpr uint16_t SUCCESS = 0x4E89;
 constexpr uint16_t DANGER = 0xF2A6;
+constexpr uint32_t STATS_REFRESH_MS = 2000;
+constexpr uint32_t BALANCE_ALERT_POLL_MS = 500;
 constexpr int32_t SWIPE_DISTANCE = 450;
 constexpr uint8_t LED_RED_PIN = 4;
 constexpr uint8_t LED_GREEN_PIN = 16;
@@ -151,6 +153,9 @@ void HeliosDisplay::begin(HeliosSettings* settings, HeliosBalances* balances) {
   touch.setRotation(settings_->data().flipped ? 3 : 1);
   appliedFlipped_ = settings_->data().flipped;
   appliedBrightness_ = settings_->data().brightness;
+  appliedRearLedEnabled_ = settings_->data().rearLedEnabled;
+  appliedSleepSeconds_ = settings_->data().screenSleepSeconds;
+  lastInteractionAt_ = millis();
   pinMode(LED_RED_PIN, OUTPUT);
   pinMode(LED_GREEN_PIN, OUTPUT);
   pinMode(LED_BLUE_PIN, OUTPUT);
@@ -163,30 +168,61 @@ void HeliosDisplay::begin(HeliosSettings* settings, HeliosBalances* balances) {
 }
 
 void HeliosDisplay::loop() {
-  if (settings_->data().brightness != appliedBrightness_) {
-    appliedBrightness_ = settings_->data().brightness;
-    display.setBrightness(appliedBrightness_);
+  const HeliosSettingsData& cfg = settings_->data();
+  if (cfg.brightness != appliedBrightness_) {
+    appliedBrightness_ = cfg.brightness;
+    if (!screenSleeping_) display.setBrightness(appliedBrightness_);
   }
-  if (settings_->data().flipped != appliedFlipped_) {
-    appliedFlipped_ = settings_->data().flipped;
+  if (cfg.rearLedEnabled != appliedRearLedEnabled_) {
+    appliedRearLedEnabled_ = cfg.rearLedEnabled;
+    updateRearLed();
+  }
+  if (cfg.screenSleepSeconds != appliedSleepSeconds_) {
+    appliedSleepSeconds_ = cfg.screenSleepSeconds;
+    lastInteractionAt_ = millis();
+    if (appliedSleepSeconds_ == 0 && screenSleeping_) wakeScreen();
+  }
+  if (cfg.flipped != appliedFlipped_) {
+    appliedFlipped_ = cfg.flipped;
     display.setRotation(appliedFlipped_ ? 3 : 1);
     touch.setRotation(appliedFlipped_ ? 3 : 1);
     redrawRequested_ = true;
   }
-  checkBalanceIncreases();
+  uint32_t now = millis();
+  if (now - lastBalanceCheckAt_ >= BALANCE_ALERT_POLL_MS) {
+    lastBalanceCheckAt_ = now;
+    checkBalanceIncreases();
+  }
+  if (screenSleeping_) {
+    if (now - lastSleepingTouchPollAt_ >= 50) {
+      lastSleepingTouchPollAt_ = now;
+      handleTouch();
+    }
+    return;
+  }
   handleTouch();
   if (blockPopupActive_) return;
+  if (appliedSleepSeconds_ > 0 &&
+      now - lastInteractionAt_ >=
+          static_cast<uint32_t>(appliedSleepSeconds_) * 1000UL) {
+    sleepScreen();
+    return;
+  }
   if (redrawRequested_) {
     redrawRequested_ = false;
     draw(true);
-  } else if (millis() - lastDrawAt_ >= 1000) {
+  } else if (now - lastDrawAt_ >= STATS_REFRESH_MS) {
     draw(false);
   }
 }
 
 void HeliosDisplay::showHome() {
   page_ = 0;
-  draw(true);
+  if (screenSleeping_) {
+    wakeScreen();
+  } else {
+    draw(true);
+  }
 }
 
 uint8_t HeliosDisplay::page() const { return page_; }
@@ -210,19 +246,23 @@ void HeliosDisplay::drawHome(const HeliosMiningStats& stats) {
   display.setTextColor(MUTED, BLACK);
   display.drawString("MINING HASHRATE", 11, 34, 1);
   display.drawString("SHARES A / R", 11, 79, 1);
+  display.setTextColor(HELIOS_AMBER, BLACK);
+  display.drawString("BLOCKS", 128, 79, 1);
 
-  display.drawFastHLine(8, 109, 304, HELIOS_GREEN);
-  display.fillRoundRect(10, 116, 300, 48, 4, PANEL);
+  display.drawFastHLine(4, 109, 312, HELIOS_GREEN);
+  display.fillRoundRect(4, 116, 312, 48, 4, PANEL);
   display.setTextColor(MUTED, PANEL);
-  display.drawString("MINING POOL", 19, 123, 1);
+  display.drawString("MINING POOL", 12, 123, 1);
   display.setTextColor(HELIOS_GREEN, PANEL);
-  display.drawString(cfg.miningPoolHost, 19, 140, 2);
+  display.drawString(cfg.miningPoolHost, 12, 140, 2);
   display.setTextDatum(lgfx::middle_right);
   display.setTextColor(WHITE, PANEL);
-  display.drawString(String(cfg.miningPoolPort), 301, 146, 1);
+  display.drawString(String(cfg.miningPoolPort), 308, 146, 1);
 
-  drawLabel(12, 170, "BEST DIFFICULTY", BLACK);
-  drawLabel(169, 170, "WEB UI", BLACK);
+  display.fillRoundRect(4, 168, 153, 50, 4, PANEL);
+  display.fillRoundRect(163, 168, 153, 50, 4, PANEL);
+  drawLabel(12, 172, "BEST DIFFICULTY");
+  drawLabel(171, 172, "WEB UI");
   drawHomeValues(stats);
   drawFooter(HELIOS_GREEN);
 }
@@ -232,18 +272,35 @@ void HeliosDisplay::drawHomeValues(const HeliosMiningStats& stats) {
   display.setTextDatum(lgfx::top_left);
   display.setTextColor(WHITE, BLACK);
   display.drawString(rateText(stats.hashrateKh), 11, 43, 4);
-  drawValue(11, 91, 160,
-            String(stats.acceptedShares) + " / " +
-                String(stats.rejectedShares),
-            WHITE, BLACK);
-  drawValue(12, 185, 145, String(stats.bestDifficulty, 4), WHITE, BLACK);
-  display.fillRect(169, 185, 137, 18, BLACK);
+  display.fillRect(10, 91, 162, 18, BLACK);
   display.setTextDatum(lgfx::top_left);
-  display.setTextColor(WiFi.status() == WL_CONNECTED ? SUCCESS : DANGER,
-                       BLACK);
-  String ip = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString()
-                                            : "HELIOS_HUNTER_SETUP";
-  display.drawString(ip, 169, 185, 2);
+  display.setTextSize(1);
+  display.setTextColor(WHITE, BLACK);
+  display.drawString(String(stats.acceptedShares) + " / " +
+                         String(stats.rejectedShares),
+                     11, 91, 2);
+  display.setTextDatum(lgfx::top_right);
+  display.setTextColor(HELIOS_AMBER, BLACK);
+  display.drawString(String(stats.blocksFound), 169, 91, 2);
+  display.setTextDatum(lgfx::top_left);
+  drawValue(12, 190, 137, String(stats.bestDifficulty, 4), WHITE, PANEL);
+  display.fillRect(171, 190, 137, 18, PANEL);
+  display.setTextDatum(lgfx::top_left);
+  bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  bool setupApRunning = false;
+  if (!wifiConnected) {
+    wifi_mode_t wifiMode = WiFi.getMode();
+    IPAddress setupIp = WiFi.softAPIP();
+    setupApRunning =
+        (wifiMode == WIFI_MODE_AP || wifiMode == WIFI_MODE_APSTA) &&
+        (setupIp[0] != 0 || setupIp[1] != 0 || setupIp[2] != 0 ||
+         setupIp[3] != 0) &&
+        WiFi.softAPSSID() == "HELIOS_HUNTER_SETUP";
+  }
+  display.setTextColor(wifiConnected ? SUCCESS : DANGER, PANEL);
+  String ip = wifiConnected ? WiFi.localIP().toString()
+                            : (setupApRunning ? "SETUP AP" : "WIFI RETRY");
+  display.drawString(ip, 171, 190, 2);
 }
 
 void HeliosDisplay::drawCoin(const HeliosCoinProfile& profile,
@@ -261,15 +318,15 @@ void HeliosDisplay::drawCoin(const HeliosCoinProfile& profile,
   display.setTextColor(profile.color, BLACK);
   display.drawString(profile.symbol, 238, 84, 2);
 
-  display.fillRoundRect(10, 106, 300, 72, 4, PANEL);
-  display.drawRoundRect(10, 106, 300, 72, 4, profile.color);
+  display.fillRoundRect(4, 106, 312, 72, 4, PANEL);
+  display.drawRoundRect(4, 106, 312, 72, 4, profile.color);
   display.setTextColor(MUTED, PANEL);
-  display.drawString("ADDRESS BALANCE", 19, 112, 1);
+  display.drawString("ADDRESS BALANCE", 12, 112, 1);
 
-  display.fillRoundRect(10, 181, 145, 36, 4, PANEL);
-  display.fillRoundRect(165, 181, 145, 36, 4, PANEL);
-  drawLabel(18, 185, "SHARES A / R");
-  drawLabel(173, 185, "BEST DIFF");
+  display.fillRoundRect(4, 181, 153, 37, 4, PANEL);
+  display.fillRoundRect(163, 181, 153, 37, 4, PANEL);
+  drawLabel(12, 185, "SHARES A / R");
+  drawLabel(171, 185, "BEST DIFF");
   drawCoinValues(profile, stats);
   drawFooter(profile.color);
 }
@@ -284,10 +341,18 @@ void HeliosDisplay::drawCoinValues(const HeliosCoinProfile& profile,
   display.fillRect(10, 76, 215, 18, BLACK);
 
   HeliosBalanceSnapshot snapshot = balances_->get(profile.id);
-  display.fillRect(18, 124, 284, 29, PANEL);
+  display.fillRect(12, 124, 296, 29, PANEL);
   display.setTextColor(profile.color, PANEL);
-  display.drawString(balanceText(profile) + " " + profile.symbol, 18, 124, 4);
-  display.fillRect(18, 153, 284, 23, PANEL);
+  String balanceLine = balanceText(profile);
+  bool largeChtaBalance =
+      profile.id == HeliosCoin::CHTA && snapshot.available;
+  balanceLine += " ";
+  balanceLine += profile.symbol;
+  uint8_t balanceFont =
+      largeChtaBalance ? 4 : (balanceLine.length() > 17 ? 2 : 4);
+  display.drawString(balanceLine, 12, balanceFont == 2 ? 130 : 124,
+                     balanceFont);
+  display.fillRect(12, 153, 296, 23, PANEL);
   display.setTextColor(WHITE, PANEL);
   uint8_t currency = settings_->data().fiatCurrency;
   const char* currencySymbol =
@@ -298,17 +363,17 @@ void HeliosDisplay::drawCoinValues(const HeliosCoinProfile& profile,
   String fiat = snapshot.available && snapshot.pricesAvailable
                     ? fiatText(snapshot.balance * price)
                     : "--";
-  display.drawString(String(currencySymbol) + fiat, 18, 156, 2);
-  display.fillRect(18, 198, 128, 14, PANEL);
+  display.drawString(String(currencySymbol) + fiat, 12, 156, 2);
+  display.fillRect(12, 198, 137, 14, PANEL);
   display.setTextColor(WHITE, PANEL);
   display.setTextFont(1);
   display.setTextSize(1);
-  display.setCursor(18, 200);
+  display.setCursor(12, 200);
   display.print(mining ? String(stats.acceptedShares) + " / " +
                              String(stats.rejectedShares)
                        : "--");
-  display.fillRect(173, 198, 128, 14, PANEL);
-  display.setCursor(173, 200);
+  display.fillRect(171, 198, 137, 14, PANEL);
+  display.setCursor(171, 200);
   display.print(mining ? String(stats.bestDifficulty, 4) : "--");
 }
 
@@ -324,7 +389,9 @@ void HeliosDisplay::checkBalanceIncreases() {
     seenIncreaseSequence_[i] = snapshot.increaseSequence;
     blockPopupCoin_ = coin;
     blockPopupAmount_ = snapshot.increaseAmount;
+    blockPopupSequence_ = snapshot.increaseSequence;
     blockPopupActive_ = true;
+    if (screenSleeping_) wakeScreen();
     drawBlockPopup();
     return;
   }
@@ -354,11 +421,19 @@ void HeliosDisplay::drawBlockPopup() {
 }
 
 void HeliosDisplay::clearBlockPopup() {
+  if (balances_ && blockPopupSequence_ != 0) {
+    balances_->acknowledgeIncrease(blockPopupCoin_, blockPopupSequence_);
+  }
   blockPopupActive_ = false;
+  blockPopupSequence_ = 0;
   draw(true);
 }
 
 void HeliosDisplay::setRearLed(uint16_t color) {
+  if (!settings_ || !settings_->data().rearLedEnabled) {
+    turnRearLedOff();
+    return;
+  }
   uint8_t red = static_cast<uint8_t>(((color >> 11) & 0x1F) * 255 / 31);
   uint8_t green = static_cast<uint8_t>(((color >> 5) & 0x3F) * 255 / 63);
   uint8_t blue = static_cast<uint8_t>((color & 0x1F) * 255 / 31);
@@ -367,9 +442,36 @@ void HeliosDisplay::setRearLed(uint16_t color) {
   analogWrite(LED_BLUE_PIN, 255 - blue);
 }
 
+void HeliosDisplay::turnRearLedOff() {
+  analogWrite(LED_RED_PIN, 255);
+  analogWrite(LED_GREEN_PIN, 255);
+  analogWrite(LED_BLUE_PIN, 255);
+}
+
 void HeliosDisplay::updateRearLed() {
+  if (!settings_ || !settings_->data().rearLedEnabled) {
+    turnRearLedOff();
+    return;
+  }
   setRearLed(page_ == 0 ? HELIOS_AMBER
                         : heliosCoinProfileAt(page_ - 1).color);
+}
+
+void HeliosDisplay::sleepScreen() {
+  if (screenSleeping_) return;
+  screenSleeping_ = true;
+  touching_ = false;
+  suppressTouchUntilRelease_ = false;
+  display.setBrightness(0);
+}
+
+void HeliosDisplay::wakeScreen() {
+  lastInteractionAt_ = millis();
+  if (!screenSleeping_) return;
+  screenSleeping_ = false;
+  display.setBrightness(appliedBrightness_);
+  redrawRequested_ = false;
+  draw(true);
 }
 
 void HeliosDisplay::drawFooter(uint16_t accent) {
@@ -384,6 +486,7 @@ void HeliosDisplay::drawFooter(uint16_t accent) {
 String HeliosDisplay::balanceText(const HeliosCoinProfile& profile) const {
   auto snapshot = balances_->get(profile.id);
   if (!snapshot.available) return snapshot.status;
+  if (profile.id == HeliosCoin::CHTA) return String(snapshot.balance, 8);
   if (snapshot.balance >= 1000000) return String(snapshot.balance / 1000000, 2) + "M";
   return String(snapshot.balance, snapshot.balance >= 1000 ? 2 : 8);
 }
@@ -398,8 +501,8 @@ String HeliosDisplay::fiatText(double value) const {
 }
 
 void HeliosDisplay::draw(bool force) {
-  if (!settings_) return;
-  if (!force && millis() - lastDrawAt_ < 900) return;
+  if (!settings_ || screenSleeping_) return;
+  if (!force && millis() - lastDrawAt_ < STATS_REFRESH_MS - 100) return;
   if (force) updateRearLed();
   lastDrawAt_ = millis();
   HeliosMiningStats stats = heliosMinerGetStats();
@@ -424,7 +527,18 @@ void HeliosDisplay::handleTouch() {
     y = point.y;
     pressed = point.z >= 400;
   }
+  if (suppressTouchUntilRelease_) {
+    if (!pressed) suppressTouchUntilRelease_ = false;
+    return;
+  }
+  if (pressed && screenSleeping_) {
+    wakeScreen();
+    suppressTouchUntilRelease_ = true;
+    touching_ = false;
+    return;
+  }
   if (pressed) {
+    lastInteractionAt_ = millis();
     if (!touching_) {
       touching_ = true;
       touchStartX_ = x;
@@ -437,6 +551,7 @@ void HeliosDisplay::handleTouch() {
 
   if (!touching_) return;
   touching_ = false;
+  lastInteractionAt_ = millis();
   if (blockPopupActive_) {
     clearBlockPopup();
     return;

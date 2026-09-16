@@ -12,6 +12,7 @@ struct HeliosBalanceSnapshot {
   bool available = false;
   bool pricesAvailable = false;
   bool refreshing = false;
+  bool baselineReady = false;
   double balance = 0.0;
   double priceUsd = 0.0;
   double priceCad = 0.0;
@@ -23,11 +24,20 @@ struct HeliosBalanceSnapshot {
   String status = "WAITING";
 };
 
+struct HeliosBalanceFetchState {
+  bool enabled = true;
+  bool active = false;
+  uint32_t sinceMs = 0;
+};
+
 class HeliosBalances {
  public:
   void begin(HeliosSettings* settings);
+  bool setFetchEnabled(bool enabled);
+  HeliosBalanceFetchState fetchState() const;
   void requestRefresh();
   void requestRefresh(HeliosCoin coin);
+  void acknowledgeIncrease(HeliosCoin coin, uint32_t sequence);
   HeliosBalanceSnapshot get(HeliosCoin coin) const;
 
  private:
@@ -48,4 +58,7 @@ class HeliosBalances {
   uint8_t pendingMask_ = 0;
   uint32_t lastSweepAt_ = 0;
   uint32_t increaseSequence_ = 0;
+  bool fetchEnabled_ = true;
+  bool fetchActive_ = false;
+  uint32_t fetchStateSinceMs_ = 0;
 };

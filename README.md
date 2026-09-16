@@ -12,10 +12,22 @@ For support, I can be reached in the `SOLO_HUNTER` channel of the HeliosPool Dis
 
 Two display versions are available:
 
-- `HELIOS_HUNTER_ILI9341_v1.0.6_merged.bin` for ILI9341 panels
-- `HELIOS_HUNTER_ST7789_v1.0.6_merged.bin` for ST7789 panels
+- `HELIOS_HUNTER_ILI9341_v1.0.7_merged.bin` for ILI9341 panels
+- `HELIOS_HUNTER_ST7789_v1.0.7_merged.bin` for ST7789 panels
 
 Use only the firmware version that matches the display controller in your CYD.
+
+## What's New in v1.0.7
+
+- Recovered the fast native SHA engine, with observed peaks around **920 kH/s** on tested CYDs. Speed varies with the device and network activity.
+- Full startup digest checks and software verification of candidate hashes remain enabled; FAST mode is never forced past a failed check.
+- More noticeable **BLOCKS** counter beside the main-screen share counter.
+- Expanded screen layout and full-size, unabridged CHTA balances with the `CHTA` label.
+- Rear-LED enable/disable and screen-sleep controls in the web UI. Mining continues while the screen sleeps.
+- Persistent balance baselines and pending balance-increase alerts across reboots.
+- Clearer Wi-Fi retry/setup behavior and device diagnostics for uptime, last reset, reconnects, and memory.
+
+Pool reconnects can still occur, and long-term restart stability remains under observation. This release does not promise zero watchdog resets. See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ## Features
 
@@ -44,8 +56,8 @@ HELIOS_HUNTER is provided as a ready-to-flash merged ESP32 firmware image. Ardui
 
 Download the merged `.bin` file that matches your display from the [latest GitHub release](https://github.com/XTVDDICT/HELIOS_HUNTER/releases/latest):
 
-- `HELIOS_HUNTER_ILI9341_v1.0.6_merged.bin`
-- `HELIOS_HUNTER_ST7789_v1.0.6_merged.bin`
+- `HELIOS_HUNTER_ILI9341_v1.0.7_merged.bin`
+- `HELIOS_HUNTER_ST7789_v1.0.7_merged.bin`
 
 ### Flashing
 
@@ -62,6 +74,8 @@ You do not need to manually flash separate files at `0x1000`, `0x8000`, `0xE000`
 ### Important
 
 Make sure you use the correct firmware for your display controller.
+
+Back up your Wi-Fi, mining, and balance-address settings before updating. Flashing a merged image can clear saved settings.
 
 - ILI9341 display → use the ILI9341 firmware
 - ST7789 display → use the ST7789 firmware
@@ -116,6 +130,8 @@ The balance-increase notification assumes an increase may represent a mined rewa
 Wi-Fi credentials, wallet addresses, and mining settings are entered after flashing and stored in the ESP32's local nonvolatile storage.
 
 They are not embedded in this repository or in the released firmware files. Release binaries are built from the public source and checked for personal wallet addresses, Wi-Fi credentials, pool usernames, access tokens, email addresses, and local computer paths before publication.
+
+The release copies also remove personal compiler/debug paths from read-only strings and update the ESP32 image checksums. Executable instructions are unchanged. Settings, filesystem, and core-dump partitions are checked to be blank; release images are not dumps from configured devices.
 
 HELIOS_HUNTER does not require your wallet seed phrase or private keys.
 

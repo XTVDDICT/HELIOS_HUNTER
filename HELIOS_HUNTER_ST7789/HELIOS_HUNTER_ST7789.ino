@@ -23,6 +23,9 @@ TaskHandle_t foregroundTaskHandle = nullptr;
 bool networkServicesStarted = false;
 uint32_t lastWifiRetryAt = 0;
 
+constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 10000U;
+constexpr char BUILD_ID[] = "R12_SHA_REFERENCE_NATIVE_20260916";
+
 HeliosMiningConfig miningConfig() {
   const HeliosSettingsData& saved = settings.data();
 
@@ -44,19 +47,29 @@ void applySettings() {
 void connectWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
   WiFi.setHostname("helios-hunter");
   wifiManager.setConfigPortalBlocking(false);
   wifiManager.setConnectTimeout(10);
   wifiManager.setTitle("HELIOS_HUNTER Setup");
+  wifiManager.setAPCallback([](WiFiManager*) {
+    Serial.print("Setup AP ready: http://");
+    Serial.println(WiFi.softAPIP());
+    screen.showHome();
+  });
   if (wifiManager.getWiFiIsSaved()) {
     WiFi.begin();
     uint32_t startedAt = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 15000U) {
       delay(100);
     }
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("Saved WiFi unavailable; retrying without setup mode");
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("WiFi connected: ");
+      Serial.println(WiFi.localIP());
+      return;
     }
+    Serial.println("Saved WiFi unavailable; starting setup portal");
+    wifiManager.startConfigPortal("HELIOS_HUNTER_SETUP");
     return;
   }
   wifiManager.autoConnect("HELIOS_HUNTER_SETUP");
@@ -79,7 +92,7 @@ void serviceForeground() {
   wifiManager.process();
   if (WiFi.status() != WL_CONNECTED &&
       !wifiManager.getConfigPortalActive() &&
-      millis() - lastWifiRetryAt >= 10000U) {
+      millis() - lastWifiRetryAt >= WIFI_RETRY_INTERVAL_MS) {
     lastWifiRetryAt = millis();
     WiFi.reconnect();
   }
@@ -100,6 +113,7 @@ void foregroundTask(void*) {
 void setup() {
   Serial.begin(115200);
   delay(100);
+  Serial.printf("Build: %s\n", BUILD_ID);
   Serial.printf("Last reset reason: %d\n", static_cast<int>(esp_reset_reason()));
   settings.begin();
   screen.begin(&settings, &balances);
@@ -121,7 +135,6 @@ void setup() {
       foregroundTask, "helios-ui", 12288, nullptr, 2,
       &foregroundTaskHandle, 0);
   if (created != pdPASS) foregroundTaskHandle = nullptr;
-
   Serial.println();
   Serial.printf("CPU: %u MHz\n", getCpuFrequencyMhz());
   Serial.println("HELIOS_HUNTER ready");

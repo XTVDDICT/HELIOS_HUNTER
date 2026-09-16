@@ -53,6 +53,30 @@ it clearly as either ILI9341 or ST7789.
 The merged image is flashed at address `0x0`. Do not flash an ILI9341 image to
 an ST7789 unit or an ST7789 image to an ILI9341 unit.
 
+## Prepare a Public Release Copy
+
+Compiled libraries may embed your local computer paths in assertion/debug
+strings even when no wallet or Wi-Fi settings are compiled in. The v1.0.7
+release copies use the included Node.js tool to remove those personal prefixes:
+
+```text
+node tools/Prepare-ReleaseImage.cjs input.merged.bin output.merged.bin
+node tools/Prepare-ReleaseImage.cjs --test
+```
+
+This tool is pinned to the R12/v1.0.7 build. It accepts only a 4 MB merged image
+with one application partition and blank user-data partitions. It modifies
+read-only debug-path prefixes only, preserves string lengths and executable
+instructions, and regenerates and checks the ESP32 checksum/SHA-256 footers.
+Signed images, configured-device dumps, and unexpected formats are rejected.
+It does not compile, export through Arduino, connect to hardware, or flash.
+
+Check the prepared image with Espressif's image tools, scan for personal data,
+and publish its SHA-256 checksum. Never publish an ELF, build cache, configured
+flash dump, or complete `/api/status` response: those may contain local paths
+or private settings. Use the original ELF privately for decoding backtraces;
+only debug-path strings and integrity footers differ in the public release copy.
+
 ## Command-Line Build
 
 The equivalent fully qualified board name is:
