@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.0.8 - 2026-10-02
+
+- Add a FixedCoin (`FIX`) balance page, web tab, official logo, fiat values,
+  matching rear-LED color, and balance-increase notifications to both display
+  versions, ordered CHTA -> WJK -> FIX -> DGB -> BCH -> BTC.
+- Keep FIX balance requests in the existing staggered background worker so
+  mining continues while wallet data refreshes.
+- Lock the recovered native SHA loop to the instruction-cache alignment used
+  by the measured 920 kH/s build, preventing unrelated UI, logo, or coin-page
+  additions from silently reducing mining speed.
+- Start `HELIOS_HUNTER_SETUP` only when ESP32 confirms that no station SSID is
+  stored. Failed connections, slow routers, and temporary Wi-Fi outages now
+  remain in retry mode and never trigger a false setup portal.
+- Strengthen station recovery with repeated saved-credential reconnects and a
+  fresh station connection attempt every sixth retry without erasing settings.
+- Buffer status JSON into 512-byte network writes and prevent overlapping web
+  polls so dashboard traffic no longer blocks touchscreen handling one byte at
+  a time.
+- Use one bounded response buffer for HTTPS balance providers, preserve the
+  last confirmed balance during temporary failures, and move popup
+  acknowledgement storage outside the touch-critical path.
+- Add compact runtime status and stack telemetry for diagnosing long-running
+  devices without burdening normal display refreshes.
+- Add generated web-asset checks, sketch-parity checks, and FAST SHA layout
+  checks so both display versions retain the same shared behavior and mining
+  engine.
+
 ## v1.0.7 - 2026-09-16
 
 ### Mining

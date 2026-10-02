@@ -264,13 +264,24 @@ __attribute__((noinline)) IRAM_ATTR void runPollingPipeline(PipelineArgs& args) 
 }
 
 // Keep the recovered native loop in flash, matching the saved fast ELF.
+// This alignment is a performance ABI: unrelated assets and UI code must not
+// be allowed to move the hot loop to a slower instruction-cache position.
 // It never masks interrupts; guarded DPORT reads remain in the IRAM loop.
-__attribute__((noinline)) void runReferenceNativePipeline(PipelineArgs& args) {
+__attribute__((noinline, aligned(32))) void runReferenceNativePipeline(PipelineArgs& args) {
   // At the standard 240/80 MHz clocks, fixed command spacing removes polling
   // and nonessential MEMW stalls. START commands retain an ordering fence
   // because SHA_TEXT is overwritten while their compression is in flight.
   // A multi-nonce self-test gates this path on every individual chip.
+  // The measured 920 kH/s image begins useful assembly at cache-line offset
+  // 17. The compiler's five-byte entry plus these twelve bytes preserves that
+  // exact offset while the function itself remains locked to 32-byte alignment.
   __asm__ __volatile__(
+      "nop.n\n"
+      "nop.n\n"
+      "nop.n\n"
+      "nop.n\n"
+      "nop.n\n"
+      "nop.n\n"
       "l32i     a3,  %[args], 0\n"
       "l32i     a4,  %[args], 4\n"
       "l32i     a2,  %[args], 8\n"

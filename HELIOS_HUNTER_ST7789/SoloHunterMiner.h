@@ -23,6 +23,8 @@ struct SoloHunterMiningStats {
   uint32_t blocksFound = 0;
   uint32_t poolReconnects = 0;
   uint32_t uptimeSeconds = 0;
+  uint32_t primaryStackFreeBytes = 0;
+  uint32_t auxiliaryStackFreeBytes = 0;
   double bestDifficulty = 0.0;
   double poolDifficulty = 0.0;
   bool hardwareSha = false;
@@ -31,4 +33,4 @@ struct SoloHunterMiningStats {
 
 void soloHunterMinerBegin(const SoloHunterMiningConfig& config);
 void soloHunterMinerConfigure(const SoloHunterMiningConfig& config);
-SoloHunterMiningStats soloHunterMinerGetStats();
+SoloHunterMiningStats soloHunterMinerGetStats(bool includeStack = false);

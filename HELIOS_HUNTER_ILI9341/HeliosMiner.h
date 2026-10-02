@@ -13,7 +13,7 @@ inline void heliosMinerConfigure(const HeliosMiningConfig& config) {
   soloHunterMinerConfigure(config);
 }
 
-inline HeliosMiningStats heliosMinerGetStats() {
-  return soloHunterMinerGetStats();
+inline HeliosMiningStats heliosMinerGetStats(bool includeStack = false) {
+  return soloHunterMinerGetStats(includeStack);
 }
 

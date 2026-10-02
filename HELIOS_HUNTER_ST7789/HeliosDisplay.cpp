@@ -129,6 +129,8 @@ PngAsset coinLogo(HeliosCoin coin) {
       return {BCH_LOGO, BCH_LOGO_SIZE};
     case HeliosCoin::BTC:
       return {BTC_LOGO, BTC_LOGO_SIZE};
+    case HeliosCoin::FIX:
+      return {FIX_LOGO, FIX_LOGO_SIZE};
   }
   return {BTC_LOGO, BTC_LOGO_SIZE};
 }
@@ -454,7 +456,7 @@ void HeliosDisplay::updateRearLed() {
     return;
   }
   setRearLed(page_ == 0 ? HELIOS_AMBER
-                        : heliosCoinProfileAt(page_ - 1).color);
+                        : heliosDisplayCoinProfileAt(page_ - 1).color);
 }
 
 void HeliosDisplay::sleepScreen() {
@@ -476,8 +478,10 @@ void HeliosDisplay::wakeScreen() {
 
 void HeliosDisplay::drawFooter(uint16_t accent) {
   display.fillRect(118, 224, 84, 12, BLACK);
-  for (uint8_t i = 0; i < 6; ++i) {
-    int16_t x = 127 + i * 13;
+  constexpr uint8_t pageCount = HELIOS_COIN_COUNT + 1;
+  constexpr int16_t firstX = 160 - (HELIOS_COIN_COUNT * 13) / 2;
+  for (uint8_t i = 0; i < pageCount; ++i) {
+    int16_t x = firstX + i * 13;
     display.fillCircle(x, 229, i == page_ ? 3 : 2,
                        i == page_ ? accent : PANEL_LIGHT);
   }
@@ -509,7 +513,7 @@ void HeliosDisplay::draw(bool force) {
   if (page_ == 0) {
     force ? drawHome(stats) : drawHomeValues(stats);
   } else {
-    const HeliosCoinProfile& profile = heliosCoinProfileAt(page_ - 1);
+    const HeliosCoinProfile& profile = heliosDisplayCoinProfileAt(page_ - 1);
     force ? drawCoin(profile, stats) : drawCoinValues(profile, stats);
   }
 }
@@ -537,6 +541,13 @@ void HeliosDisplay::handleTouch() {
     touching_ = false;
     return;
   }
+  if (pressed && blockPopupActive_) {
+    lastInteractionAt_ = now;
+    clearBlockPopup();
+    suppressTouchUntilRelease_ = true;
+    touching_ = false;
+    return;
+  }
   if (pressed) {
     lastInteractionAt_ = millis();
     if (!touching_) {
@@ -552,21 +563,17 @@ void HeliosDisplay::handleTouch() {
   if (!touching_) return;
   touching_ = false;
   lastInteractionAt_ = millis();
-  if (blockPopupActive_) {
-    clearBlockPopup();
-    return;
-  }
   int32_t dx = touchLastX_ - touchStartX_;
   int32_t dy = touchLastY_ - touchStartY_;
   int32_t primaryDelta = abs(dx) >= abs(dy) ? dx : dy;
   if (abs(primaryDelta) >= SWIPE_DISTANCE) {
-    if (primaryDelta < 0 && page_ < 5) ++page_;
+    if (primaryDelta < 0 && page_ < HELIOS_COIN_COUNT) ++page_;
     if (primaryDelta > 0 && page_ > 0) --page_;
     draw(true);
     return;
   }
 
-  if (touchLastX_ > 2400 && page_ < 5) {
+  if (touchLastX_ > 2400 && page_ < HELIOS_COIN_COUNT) {
     ++page_;
     draw(true);
   } else if (touchLastX_ < 1600 && page_ > 0) {

@@ -2,7 +2,7 @@
 
 ![HeliosPool logo](assets/heliospool-main.png)
 
-HELIOS_HUNTER is multi-coin mining firmware for the ESP32 Cheap Yellow Display. It combines an independent SHA-256d Stratum miner with balance pages for Cheetahcoin, WojakCoin, DigiByte, Bitcoin Cash, and Bitcoin.
+HELIOS_HUNTER is multi-coin mining firmware for the ESP32 Cheap Yellow Display. It combines an independent SHA-256d Stratum miner with balance pages for Cheetahcoin, WojakCoin, DigiByte, Bitcoin Cash, Bitcoin, and FixedCoin.
 
 ## Independent Project
 
@@ -12,20 +12,19 @@ For support, I can be reached in the `SOLO_HUNTER` channel of the HeliosPool Dis
 
 Two display versions are available:
 
-- `HELIOS_HUNTER_ILI9341_v1.0.7_merged.bin` for ILI9341 panels
-- `HELIOS_HUNTER_ST7789_v1.0.7_merged.bin` for ST7789 panels
+- `HELIOS_HUNTER_ILI9341_v1.0.8_merged.bin` for ILI9341 panels
+- `HELIOS_HUNTER_ST7789_v1.0.8_merged.bin` for ST7789 panels
 
 Use only the firmware version that matches the display controller in your CYD.
 
-## What's New in v1.0.7
+## What's New in v1.0.8
 
-- Recovered the fast native SHA engine, with observed peaks around **920 kH/s** on tested CYDs. Speed varies with the device and network activity.
-- Full startup digest checks and software verification of candidate hashes remain enabled; FAST mode is never forced past a failed check.
-- More noticeable **BLOCKS** counter beside the main-screen share counter.
-- Expanded screen layout and full-size, unabridged CHTA balances with the `CHTA` label.
-- Rear-LED enable/disable and screen-sleep controls in the web UI. Mining continues while the screen sleeps.
-- Persistent balance baselines and pending balance-increase alerts across reboots.
-- Clearer Wi-Fi retry/setup behavior and device diagnostics for uptime, last reset, reconnects, and memory.
+- Added FixedCoin (`FIX`) throughout both display versions, including its balance page, web tab, fiat value, logo, rear-LED color, and balance-increase alerts.
+- Improved touchscreen and web-dashboard responsiveness by buffering status output and preventing overlapping dashboard requests.
+- Reduced balance-update memory pressure and kept the last confirmed balance visible during temporary explorer or network failures.
+- Setup mode now opens only when Wi-Fi credentials are actually missing; temporary connection failures stay in retry mode.
+- Preserved the validated FAST SHA engine and its measured instruction layout, with observed peaks around **920 kH/s** on tested CYDs.
+- Kept persistent touch-to-clear balance notifications, diagnostics, and the more visible **BLOCKS** counter.
 
 Pool reconnects can still occur, and long-term restart stability remains under observation. This release does not promise zero watchdog resets. See [CHANGELOG.md](CHANGELOG.md) for details.
 
@@ -34,7 +33,7 @@ Pool reconnects can still occur, and long-term restart stability remains under o
 - Hardware-accelerated ESP32 SHA-256d mining
 - User-configurable pool, port, username, worker, and password
 - Mining remains independent from the selected balance screen
-- Screen order: HeliosPool, CHTA, WJK, DGB, BCH, BTC
+- Screen order: HeliosPool, CHTA, WJK, FIX, DGB, BCH, BTC
 - Swipe navigation and matching rear-LED colors
 - Live hashrate, accepted/rejected shares, and best difficulty on every page
 - Address balances and a selectable USD, CAD, or GBP value
@@ -56,8 +55,8 @@ HELIOS_HUNTER is provided as a ready-to-flash merged ESP32 firmware image. Ardui
 
 Download the merged `.bin` file that matches your display from the [latest GitHub release](https://github.com/XTVDDICT/HELIOS_HUNTER/releases/latest):
 
-- `HELIOS_HUNTER_ILI9341_v1.0.7_merged.bin`
-- `HELIOS_HUNTER_ST7789_v1.0.7_merged.bin`
+- `HELIOS_HUNTER_ILI9341_v1.0.8_merged.bin`
+- `HELIOS_HUNTER_ST7789_v1.0.8_merged.bin`
 
 ### Flashing
 
@@ -120,6 +119,7 @@ The firmware checks:
 - DigiByte (DGB)
 - Bitcoin Cash (BCH)
 - Bitcoin (BTC)
+- FixedCoin (FIX)
 
 through multiple independent explorer or Electrum sources. The firmware refreshes periodically and automatically tries a fallback when a provider is unavailable. DigiByte public data may occasionally be delayed by its provider.
 

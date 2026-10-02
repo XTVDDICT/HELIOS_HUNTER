@@ -14,7 +14,14 @@ constexpr HeliosCoinProfile PROFILES[HELIOS_COIN_COUNT] = {
      0x45E8},
     {HeliosCoin::BTC, "BTC", "Bitcoin", "btc.heliospool.com", 3333,
      0xFD20},
+    {HeliosCoin::FIX, "FIX", "FixedCoin", "fix.heliospool.com", 3338,
+     0xFDC0},
 };
+
+// Keep persistent enum indexes stable while presenting the requested order.
+constexpr HeliosCoin DISPLAY_ORDER[HELIOS_COIN_COUNT] = {
+    HeliosCoin::CHTA, HeliosCoin::WJK, HeliosCoin::FIX,
+    HeliosCoin::DGB, HeliosCoin::BCH, HeliosCoin::BTC};
 
 }  // namespace
 
@@ -25,6 +32,11 @@ const HeliosCoinProfile& heliosCoinProfile(HeliosCoin coin) {
 const HeliosCoinProfile& heliosCoinProfileAt(size_t index) {
   if (index >= HELIOS_COIN_COUNT) index = HELIOS_COIN_COUNT - 1;
   return PROFILES[index];
+}
+
+const HeliosCoinProfile& heliosDisplayCoinProfileAt(size_t index) {
+  if (index >= HELIOS_COIN_COUNT) index = HELIOS_COIN_COUNT - 1;
+  return heliosCoinProfile(DISPLAY_ORDER[index]);
 }
 
 bool heliosCoinFromSymbol(String symbol, HeliosCoin& coin) {

@@ -8,6 +8,7 @@ enum class HeliosCoin : uint8_t {
   DGB,
   BCH,
   BTC,
+  FIX,
   Count
 };
 
@@ -24,6 +25,7 @@ constexpr size_t HELIOS_COIN_COUNT = static_cast<size_t>(HeliosCoin::Count);
 
 const HeliosCoinProfile& heliosCoinProfile(HeliosCoin coin);
 const HeliosCoinProfile& heliosCoinProfileAt(size_t index);
+const HeliosCoinProfile& heliosDisplayCoinProfileAt(size_t index);
 bool heliosCoinFromSymbol(String symbol, HeliosCoin& coin);
 size_t heliosCoinIndex(HeliosCoin coin);
 

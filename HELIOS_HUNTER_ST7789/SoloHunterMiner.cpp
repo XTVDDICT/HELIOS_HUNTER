@@ -1189,6 +1189,7 @@ void miningTask(void*) {
   clearSession(session);
   if (!miningMathSelfTest()) {
     setStatus("SELF TEST FAIL");
+    minerTaskHandle = nullptr;
     vTaskDelete(nullptr);
     return;
   }
@@ -1508,11 +1509,23 @@ void soloHunterMinerConfigure(const SoloHunterMiningConfig& config) {
   unlockState();
 }
 
-SoloHunterMiningStats soloHunterMinerGetStats() {
+SoloHunterMiningStats soloHunterMinerGetStats(bool includeStack) {
   lockState();
   SoloHunterMiningStats copy = activeStats;
   copy.uptimeSeconds =
       statsStartedAt > 0 ? (uint32_t)((millis() - statsStartedAt) / 1000U) : 0;
   unlockState();
+  if (includeStack) {
+    copy.primaryStackFreeBytes =
+        minerTaskHandle
+            ? static_cast<uint32_t>(
+                  uxTaskGetStackHighWaterMark(minerTaskHandle))
+            : 0;
+    copy.auxiliaryStackFreeBytes =
+        auxiliaryMinerTaskHandle
+            ? static_cast<uint32_t>(
+                  uxTaskGetStackHighWaterMark(auxiliaryMinerTaskHandle))
+            : 0;
+  }
   return copy;
 }

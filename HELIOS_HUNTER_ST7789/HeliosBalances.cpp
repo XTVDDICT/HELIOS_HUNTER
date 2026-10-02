@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
+#include <StreamString.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
@@ -30,14 +31,14 @@ constexpr size_t MIN_REQUEST_LARGEST_BLOCK = 8192;
 constexpr uint8_t ALL_COINS_MASK = (1U << HELIOS_COIN_COUNT) - 1U;
 constexpr const char* BALANCE_STATE_NAMESPACE = "heliosbal";
 constexpr const char* BALANCE_WALLET_KEYS[HELIOS_COIN_COUNT] = {
-    "wallet0", "wallet1", "wallet2", "wallet3", "wallet4"};
+    "wallet0", "wallet1", "wallet2", "wallet3", "wallet4", "wallet5"};
 constexpr const char* BALANCE_VALUE_KEYS[HELIOS_COIN_COUNT] = {
-    "balance0", "balance1", "balance2", "balance3", "balance4"};
+    "balance0", "balance1", "balance2", "balance3", "balance4", "balance5"};
 constexpr const char* PENDING_VALUE_KEYS[HELIOS_COIN_COUNT] = {
-    "pending0", "pending1", "pending2", "pending3", "pending4"};
+    "pending0", "pending1", "pending2", "pending3", "pending4", "pending5"};
 constexpr const char* PRICE_IDS[HELIOS_COIN_COUNT] = {
     "chta-cheetahcoin", "wjk-wojakcoin", "dgb-digibyte",
-    "bch-bitcoin-cash", "btc-bitcoin"};
+    "bch-bitcoin-cash", "btc-bitcoin", "fix-fixedcoin"};
 
 struct ElectrumServer {
   const char* host;
@@ -123,7 +124,7 @@ bool requestMemoryAvailable(String& error) {
   return false;
 }
 
-bool getPayloadOnce(const String& url, bool secure, String& payload,
+bool getPayloadOnce(const String& url, bool secure, StreamString& payload,
                      String& error) {
   if (!requestMemoryAvailable(error)) return false;
 
@@ -172,9 +173,19 @@ bool getPayloadOnce(const String& url, bool secure, String& payload,
     http.end();
     return false;
   }
-  payload = http.getString();
+  int bytesRead = http.writeToStream(&payload);
+  if (bytesRead < 0) {
+    error = String("NET ") + bytesRead;
+    http.end();
+    return false;
+  }
+  if (responseSize >= 0 && bytesRead != responseSize) {
+    error = "INCOMPLETE RESPONSE";
+    http.end();
+    return false;
+  }
   if (payload.length() > MAX_HTTP_PAYLOAD_BYTES) {
-    payload = "";
+    payload.clear();
     error = "RESPONSE TOO LARGE";
     http.end();
     return false;
@@ -183,10 +194,10 @@ bool getPayloadOnce(const String& url, bool secure, String& payload,
   return true;
 }
 
-bool getPayload(const String& url, bool secure, String& payload,
+bool getPayload(const String& url, bool secure, StreamString& payload,
                 String& error) {
   for (uint8_t attempt = 0; attempt < REQUEST_ATTEMPTS; ++attempt) {
-    payload = "";
+    payload.clear();
     if (getPayloadOnce(url, secure, payload, error)) return true;
     if (attempt + 1 < REQUEST_ATTEMPTS) vTaskDelay(pdMS_TO_TICKS(350));
   }
@@ -516,13 +527,17 @@ bool HeliosBalances::setFetchEnabled(bool enabled) {
   return true;
 }
 
-HeliosBalanceFetchState HeliosBalances::fetchState() const {
+HeliosBalanceFetchState HeliosBalances::fetchState(bool includeStack) const {
   HeliosBalanceFetchState state;
   if (!mutex_) return state;
   xSemaphoreTake(mutex_, portMAX_DELAY);
   state.enabled = fetchEnabled_;
   state.active = fetchActive_;
   state.sinceMs = fetchStateSinceMs_;
+  if (includeStack && task_) {
+    state.stackFreeBytes =
+        static_cast<uint32_t>(uxTaskGetStackHighWaterMark(task_));
+  }
   xSemaphoreGive(mutex_);
   return state;
 }
@@ -545,6 +560,7 @@ void HeliosBalances::syncWallets() {
       double pendingIncrease = 0.0;
       if (loadStoredBalanceState(i, wallet, storedBalance, pendingIncrease)) {
         snapshots_[i].baselineReady = true;
+        snapshots_[i].available = true;
         snapshots_[i].balance = storedBalance;
         if (pendingIncrease > 0.0) {
           snapshots_[i].increaseAmount = pendingIncrease;
@@ -592,13 +608,17 @@ void HeliosBalances::acknowledgeIncrease(HeliosCoin coin,
                                          uint32_t sequence) {
   if (!mutex_ || sequence == 0) return;
   size_t index = heliosCoinIndex(coin);
+  bool queued = false;
   xSemaphoreTake(mutex_, portMAX_DELAY);
   if (snapshots_[index].increaseSequence == sequence) {
     snapshots_[index].increaseAmount = 0.0;
     snapshots_[index].increaseSequence = 0;
-    clearStoredPendingIncrease(index, wallets_[index]);
+    acknowledgedWallets_[index] = wallets_[index];
+    pendingAcknowledgementMask_ |= 1U << index;
+    queued = true;
   }
   xSemaphoreGive(mutex_);
+  if (queued && task_) xTaskNotifyGive(task_);
 }
 
 HeliosBalanceSnapshot HeliosBalances::get(HeliosCoin coin) const {
@@ -614,9 +634,31 @@ void HeliosBalances::taskEntry(void* argument) {
   static_cast<HeliosBalances*>(argument)->taskLoop();
 }
 
+void HeliosBalances::processAcknowledgements() {
+  for (;;) {
+    size_t index = HELIOS_COIN_COUNT;
+    String wallet;
+    bool clearStored = false;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    for (size_t i = 0; i < HELIOS_COIN_COUNT; ++i) {
+      if ((pendingAcknowledgementMask_ & (1U << i)) == 0) continue;
+      pendingAcknowledgementMask_ &= ~(1U << i);
+      index = i;
+      wallet = acknowledgedWallets_[i];
+      acknowledgedWallets_[i] = "";
+      clearStored = snapshots_[i].increaseSequence == 0;
+      break;
+    }
+    xSemaphoreGive(mutex_);
+    if (index == HELIOS_COIN_COUNT) return;
+    if (clearStored) clearStoredPendingIncrease(index, wallet);
+  }
+}
+
 void HeliosBalances::taskLoop() {
   uint32_t wifiReadyAt = 0;
   for (;;) {
+    processAcknowledgements();
     if (!fetchState().enabled) {
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
       continue;
@@ -706,9 +748,8 @@ void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet) {
     return;
   }
   snapshots_[index].refreshing = false;
-  snapshots_[index].available = balanceOk;
-  snapshots_[index].pricesAvailable = pricesOk;
   if (balanceOk) {
+    snapshots_[index].available = true;
     double previousBalance = snapshots_[index].balance;
     bool hadBaseline = snapshots_[index].baselineReady;
     bool increased = hadBaseline &&
@@ -731,13 +772,18 @@ void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet) {
       pendingIncrease = snapshots_[index].increaseAmount;
     }
   } else if (wallet.isEmpty()) {
+    snapshots_[index].available = false;
     snapshots_[index].balance = 0;
     snapshots_[index].status = "NOT SET";
   } else {
-    snapshots_[index].status =
-        balanceError.isEmpty() ? "UNAVAILABLE" : balanceError;
+    snapshots_[index].available = snapshots_[index].baselineReady;
+    String reason = balanceError.isEmpty() ? "UNAVAILABLE" : balanceError;
+    snapshots_[index].status = snapshots_[index].available
+        ? String("CACHED (") + reason + ")"
+        : reason;
   }
   if (pricesOk) {
+    snapshots_[index].pricesAvailable = true;
     snapshots_[index].priceUsd = usd;
     snapshots_[index].priceCad = cad;
     snapshots_[index].priceGbp = gbp;
@@ -752,7 +798,7 @@ void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet) {
 bool HeliosBalances::fetchBalance(HeliosCoin coin, const String& wallet,
                                   double& balance, String& error) {
   if (coin == HeliosCoin::WJK) {
-    String payload;
+    StreamString payload;
     String primaryError;
     String primaryUrl =
         "https://explorer.wojakcoin.cash/api/address/" + wallet;
@@ -772,7 +818,7 @@ bool HeliosBalances::fetchBalance(HeliosCoin coin, const String& wallet,
     if (error.isEmpty()) error = "BAD RESPONSE";
     return false;
   }
-  String payload;
+  StreamString payload;
   String primaryError;
   String fallbackError;
   switch (coin) {
@@ -825,6 +871,15 @@ bool HeliosBalances::fetchBalance(HeliosCoin coin, const String& wallet,
       }
       break;
 
+    case HeliosCoin::FIX:
+      if (getPayload("https://explorer.fixedcoin.org/ext/getbalance/" +
+                         wallet,
+                     true, payload, primaryError) &&
+          parseNumber(payload, balance)) {
+        return true;
+      }
+      break;
+
     default:
       error = "UNKNOWN COIN";
       return false;
@@ -840,10 +895,10 @@ bool HeliosBalances::fetchPrices(HeliosCoin coin, double& usd, double& cad,
   String url = "https://api.coinpaprika.com/v1/tickers/" +
                String(PRICE_IDS[heliosCoinIndex(coin)]) +
                "?quotes=USD,CAD,GBP";
-  String payload;
+  StreamString payload;
   if (!getPayload(url, true, payload, error)) return false;
   JsonDocument document;
-  if (deserializeJson(document, payload)) {
+  if (deserializeJson(document, static_cast<const String&>(payload))) {
     error = "PRICE RESPONSE";
     return false;
   }

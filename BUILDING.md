@@ -44,6 +44,27 @@ Use these settings under **Tools**:
 Choose the correct COM port, then use **Sketch > Verify/Compile** followed by
 **Sketch > Upload**.
 
+## Hashrate Release Gate
+
+Hashrate is a release requirement. The native SHA loop has a fixed 32-byte
+function boundary and internal padding that preserve the cache position of the
+measured 920 kH/s build. Do not remove or alter that alignment or padding.
+
+Before publishing either display version, test it on the same CYD and pool as
+the current reference image. A new build must retain `HARDWARE SHA FAST`, must
+not introduce watchdog resets or SAFE-mode fallback, and must not show a
+repeatable hashrate regression. A feature is not release-ready when it passes
+functional checks but reduces mining speed.
+
+After compiling, verify the private ELF before testing the device:
+
+```text
+powershell -ExecutionPolicy Bypass -File tools/Check-FastShaLayout.ps1 <path-to-sketch.elf>
+```
+
+The check must report `PASS`. Keep the ELF private; do not include it in a
+release.
+
 ## Export a Shareable Binary
 
 Use **Sketch > Export Compiled Binary**. Arduino places the exported files in
@@ -53,10 +74,35 @@ it clearly as either ILI9341 or ST7789.
 The merged image is flashed at address `0x0`. Do not flash an ILI9341 image to
 an ST7789 unit or an ST7789 image to an ILI9341 unit.
 
+## Edit the Web Interface
+
+The editable web page lives once at `web/HeliosWebPage.html`. After changing it,
+regenerate the compressed sketch headers and check that they are current:
+
+```text
+node tools/Generate-WebAsset.cjs .
+node tools/Generate-WebAsset.cjs --check .
+```
+
+Both display sketches serve the same gzip asset. Do not edit the generated
+`HeliosWebPageGzip.h` files directly.
+
+## Regenerate Display Assets
+
+The original PNG artwork lives in `assets/`. After changing a logo, regenerate
+the shared display header and copy the result to the other screen folder:
+
+```text
+py -3 tools/generate_logo.py assets HELIOS_HUNTER_ILI9341/HeliosAssets.h
+```
+
+Both screen versions use identical artwork, so their generated
+`HeliosAssets.h` files must remain byte-for-byte identical.
+
 ## Prepare a Public Release Copy
 
 Compiled libraries may embed your local computer paths in assertion/debug
-strings even when no wallet or Wi-Fi settings are compiled in. The v1.0.7
+strings even when no wallet or Wi-Fi settings are compiled in. The v1.0.8
 release copies use the included Node.js tool to remove those personal prefixes:
 
 ```text
@@ -64,7 +110,7 @@ node tools/Prepare-ReleaseImage.cjs input.merged.bin output.merged.bin
 node tools/Prepare-ReleaseImage.cjs --test
 ```
 
-This tool is pinned to the R12/v1.0.7 build. It accepts only a 4 MB merged image
+This tool is pinned to the R17/v1.0.8 build. It accepts only a 4 MB merged image
 with one application partition and blank user-data partitions. It modifies
 read-only debug-path prefixes only, preserves string lengths and executable
 instructions, and regenerates and checks the ESP32 checksum/SHA-256 footers.

@@ -28,13 +28,14 @@ struct HeliosBalanceFetchState {
   bool enabled = true;
   bool active = false;
   uint32_t sinceMs = 0;
+  uint32_t stackFreeBytes = 0;
 };
 
 class HeliosBalances {
  public:
   void begin(HeliosSettings* settings);
   bool setFetchEnabled(bool enabled);
-  HeliosBalanceFetchState fetchState() const;
+  HeliosBalanceFetchState fetchState(bool includeStack = false) const;
   void requestRefresh();
   void requestRefresh(HeliosCoin coin);
   void acknowledgeIncrease(HeliosCoin coin, uint32_t sequence);
@@ -43,6 +44,7 @@ class HeliosBalances {
  private:
   static void taskEntry(void* argument);
   void taskLoop();
+  void processAcknowledgements();
   void syncWallets();
   void refreshCoin(HeliosCoin coin, const String& wallet);
   bool fetchBalance(HeliosCoin coin, const String& wallet, double& balance,
@@ -56,6 +58,8 @@ class HeliosBalances {
   String wallets_[HELIOS_COIN_COUNT];
   HeliosBalanceSnapshot snapshots_[HELIOS_COIN_COUNT];
   uint8_t pendingMask_ = 0;
+  uint8_t pendingAcknowledgementMask_ = 0;
+  String acknowledgedWallets_[HELIOS_COIN_COUNT];
   uint32_t lastSweepAt_ = 0;
   uint32_t increaseSequence_ = 0;
   bool fetchEnabled_ = true;

@@ -3,6 +3,7 @@
 #include <WiFiManager.h>
 #include <esp_pm.h>
 #include <esp_system.h>
+#include <esp_wifi.h>
 
 #include "HeliosCoins.h"
 #include "HeliosDisplay.h"
@@ -22,9 +23,23 @@ esp_pm_lock_handle_t cpuFrequencyLock = nullptr;
 TaskHandle_t foregroundTaskHandle = nullptr;
 bool networkServicesStarted = false;
 uint32_t lastWifiRetryAt = 0;
+uint8_t wifiRetryCount = 0;
+
+enum class WifiCredentialState : uint8_t {
+  Present,
+  Missing,
+  Unavailable,
+};
+
+WifiCredentialState readWifiCredentialState();
+void startSetupPortal();
+void retrySavedWifi();
+
+WifiCredentialState wifiCredentialState = WifiCredentialState::Unavailable;
 
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 10000U;
-constexpr char BUILD_ID[] = "R12_SHA_REFERENCE_NATIVE_20260916";
+constexpr uint8_t WIFI_RECONNECTS_BEFORE_RESTART = 6;
+constexpr char BUILD_ID[] = "R17_UI_NETWORK_20261002";
 
 HeliosMiningConfig miningConfig() {
   const HeliosSettingsData& saved = settings.data();
@@ -44,6 +59,46 @@ void applySettings() {
   screen.requestRedraw();
 }
 
+WifiCredentialState readWifiCredentialState() {
+  wifi_config_t config = {};
+  esp_err_t result = esp_wifi_get_config(WIFI_IF_STA, &config);
+  if (result != ESP_OK) {
+    Serial.printf("Saved WiFi check unavailable: %d\n",
+                  static_cast<int>(result));
+    return WifiCredentialState::Unavailable;
+  }
+  return config.sta.ssid[0] == '\0' ? WifiCredentialState::Missing
+                                    : WifiCredentialState::Present;
+}
+
+void startSetupPortal() {
+  if (wifiManager.getConfigPortalActive()) return;
+  Serial.println("No saved WiFi credentials; starting setup portal");
+  wifiManager.startConfigPortal("HELIOS_HUNTER_SETUP");
+}
+
+void retrySavedWifi() {
+  WifiCredentialState current = readWifiCredentialState();
+  if (current == WifiCredentialState::Missing) {
+    wifiCredentialState = current;
+    startSetupPortal();
+    return;
+  }
+  if (current == WifiCredentialState::Present) {
+    wifiCredentialState = current;
+  }
+
+  ++wifiRetryCount;
+  if (wifiRetryCount >= WIFI_RECONNECTS_BEFORE_RESTART) {
+    wifiRetryCount = 0;
+    Serial.println("WiFi retry: restarting station connection");
+    WiFi.begin();
+  } else {
+    Serial.println("WiFi retry: reconnecting with saved credentials");
+    WiFi.reconnect();
+  }
+}
+
 void connectWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
@@ -51,28 +106,34 @@ void connectWifi() {
   WiFi.setHostname("helios-hunter");
   wifiManager.setConfigPortalBlocking(false);
   wifiManager.setConnectTimeout(10);
+  // Never let a connection timeout automatically create an AP. The portal is
+  // started explicitly only when ESP32 confirms that no station SSID is saved.
+  wifiManager.setEnableConfigPortal(false);
   wifiManager.setTitle("HELIOS_HUNTER Setup");
   wifiManager.setAPCallback([](WiFiManager*) {
     Serial.print("Setup AP ready: http://");
     Serial.println(WiFi.softAPIP());
     screen.showHome();
   });
-  if (wifiManager.getWiFiIsSaved()) {
-    WiFi.begin();
-    uint32_t startedAt = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 15000U) {
-      delay(100);
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.print("WiFi connected: ");
-      Serial.println(WiFi.localIP());
-      return;
-    }
-    Serial.println("Saved WiFi unavailable; starting setup portal");
-    wifiManager.startConfigPortal("HELIOS_HUNTER_SETUP");
+  wifiCredentialState = readWifiCredentialState();
+  if (wifiCredentialState == WifiCredentialState::Missing) {
+    startSetupPortal();
     return;
   }
-  wifiManager.autoConnect("HELIOS_HUNTER_SETUP");
+
+  WiFi.begin();
+  uint32_t startedAt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 15000U) {
+    delay(100);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiCredentialState = WifiCredentialState::Present;
+    Serial.print("WiFi connected: ");
+    Serial.println(WiFi.localIP());
+    return;
+  }
+  Serial.println("Saved WiFi unavailable; remaining in station retry mode");
+  lastWifiRetryAt = millis();
 }
 
 void startNetworkServices() {
@@ -90,11 +151,14 @@ void startNetworkServices() {
 
 void serviceForeground() {
   wifiManager.process();
-  if (WiFi.status() != WL_CONNECTED &&
-      !wifiManager.getConfigPortalActive() &&
-      millis() - lastWifiRetryAt >= WIFI_RETRY_INTERVAL_MS) {
+  bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  if (wifiConnected) {
+    wifiCredentialState = WifiCredentialState::Present;
+    wifiRetryCount = 0;
+  } else if (!wifiManager.getConfigPortalActive() &&
+             millis() - lastWifiRetryAt >= WIFI_RETRY_INTERVAL_MS) {
     lastWifiRetryAt = millis();
-    WiFi.reconnect();
+    retrySavedWifi();
   }
   startNetworkServices();
   if (networkServicesStarted) web.loop();
