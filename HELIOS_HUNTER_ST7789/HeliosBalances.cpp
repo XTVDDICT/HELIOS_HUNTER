@@ -31,14 +31,17 @@ constexpr size_t MIN_REQUEST_LARGEST_BLOCK = 8192;
 constexpr uint8_t ALL_COINS_MASK = (1U << HELIOS_COIN_COUNT) - 1U;
 constexpr const char* BALANCE_STATE_NAMESPACE = "heliosbal";
 constexpr const char* BALANCE_WALLET_KEYS[HELIOS_COIN_COUNT] = {
-    "wallet0", "wallet1", "wallet2", "wallet3", "wallet4", "wallet5"};
+    "wallet0", "wallet1", "wallet2", "wallet3", "wallet4", "wallet5",
+    "wallet6"};
 constexpr const char* BALANCE_VALUE_KEYS[HELIOS_COIN_COUNT] = {
-    "balance0", "balance1", "balance2", "balance3", "balance4", "balance5"};
+    "balance0", "balance1", "balance2", "balance3", "balance4", "balance5",
+    "balance6"};
 constexpr const char* PENDING_VALUE_KEYS[HELIOS_COIN_COUNT] = {
-    "pending0", "pending1", "pending2", "pending3", "pending4", "pending5"};
+    "pending0", "pending1", "pending2", "pending3", "pending4", "pending5",
+    "pending6"};
 constexpr const char* PRICE_IDS[HELIOS_COIN_COUNT] = {
     "chta-cheetahcoin", "wjk-wojakcoin", "dgb-digibyte",
-    "bch-bitcoin-cash", "btc-bitcoin", "fix-fixedcoin"};
+    "bch-bitcoin-cash", "btc-bitcoin", "fix-fixedcoin", "xec-ecash"};
 
 struct ElectrumServer {
   const char* host;
@@ -103,6 +106,12 @@ constexpr ElectrumServer BCH_ELECTRUM_SERVERS[] = {
     {"bch.electrum1.cipig.net", 10055},
     {"bch.electrum2.cipig.net", 10055},
     {"bch.electrum3.cipig.net", 10055}};
+
+constexpr ElectrumServer XEC_ELECTRUM_SERVERS[] = {
+    {"electrum.bitcoinabc.org", 50001},
+    {"electrum.fabien.cash", 50001},
+    {"fulcrum.pierre.cash", 50001},
+    {"electrum.pierre.cash", 50001}};
 
 bool parseNumber(String payload, double& value) {
   payload.trim();
@@ -303,11 +312,14 @@ uint64_t cashaddrPolymodStep(uint64_t checksum, uint8_t value) {
   return checksum;
 }
 
-bool decodeCashAddress(const String& address, bool& scriptHash,
-                       uint8_t hash[20]) {
+bool decodeCashAddress(const String& address, const char* expectedPrefix,
+                       bool& scriptHash, uint8_t hash[20]) {
   static constexpr char CHARSET[] =
       "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-  if (address.isEmpty() || address.length() > 130) return false;
+  if (address.isEmpty() || address.length() > 130 || !expectedPrefix ||
+      !expectedPrefix[0]) {
+    return false;
+  }
 
   bool hasLower = false;
   bool hasUpper = false;
@@ -322,10 +334,10 @@ bool decodeCashAddress(const String& address, bool& scriptHash,
   normalized.toLowerCase();
   int separator = normalized.lastIndexOf(':');
   String prefix = separator >= 0 ? normalized.substring(0, separator)
-                                 : String("bitcoincash");
+                                 : String(expectedPrefix);
   String payload = separator >= 0 ? normalized.substring(separator + 1)
                                   : normalized;
-  if (prefix != "bitcoincash" || payload.length() <= 8 ||
+  if (prefix != expectedPrefix || payload.length() <= 8 ||
       payload.length() > 120) {
     return false;
   }
@@ -378,15 +390,18 @@ bool decodeCashAddress(const String& address, bool& scriptHash,
 }
 
 bool addressToElectrumScriptHash(const String& address, uint8_t pubkeyVersion,
-                                 uint8_t scriptVersion, bool allowCashAddress,
+                                 uint8_t scriptVersion,
+                                 const char* cashAddressPrefix,
                                  String& scriptHashHex) {
   uint8_t hash[20];
   bool isScriptHash = false;
-  if (allowCashAddress &&
+  if (cashAddressPrefix &&
       (address.indexOf(':') >= 0 || address.startsWith("q") ||
        address.startsWith("p") || address.startsWith("Q") ||
        address.startsWith("P"))) {
-    if (!decodeCashAddress(address, isScriptHash, hash)) return false;
+    if (!decodeCashAddress(address, cashAddressPrefix, isScriptHash, hash)) {
+      return false;
+    }
   } else {
     uint8_t version = 0;
     if (!decodeBase58Address(address, version, hash)) return false;
@@ -430,7 +445,7 @@ bool addressToElectrumScriptHash(const String& address, uint8_t pubkeyVersion,
 }
 
 bool queryElectrum(const ElectrumServer& server, const String& scriptHash,
-                   double& balance, String& error) {
+                   double baseUnitsPerCoin, double& balance, String& error) {
   WiFiClient client;
   client.setTimeout(ELECTRUM_TIMEOUT_MS);
   if (!client.connect(server.host, server.port, ELECTRUM_TIMEOUT_MS)) {
@@ -463,7 +478,7 @@ bool queryElectrum(const ElectrumServer& server, const String& scriptHash,
     }
     int64_t satoshis = result["confirmed"].as<int64_t>() +
                        result["unconfirmed"].as<int64_t>();
-    balance = static_cast<double>(satoshis) / 100000000.0;
+    balance = static_cast<double>(satoshis) / baseUnitsPerCoin;
     client.stop();
     return isfinite(balance) && balance >= 0;
   }
@@ -474,17 +489,26 @@ bool queryElectrum(const ElectrumServer& server, const String& scriptHash,
 
 template <size_t N>
 bool getElectrumBalance(const String& wallet, uint8_t pubkeyVersion,
-                        uint8_t scriptVersion, bool allowCashAddress,
+                        uint8_t scriptVersion,
+                        const char* cashAddressPrefix,
+                        double baseUnitsPerCoin,
                         const ElectrumServer (&servers)[N], double& balance,
                         String& error) {
+  if (!isfinite(baseUnitsPerCoin) || baseUnitsPerCoin <= 0.0) {
+    error = "BALANCE CONFIG";
+    return false;
+  }
   String scriptHash;
   if (!addressToElectrumScriptHash(wallet, pubkeyVersion, scriptVersion,
-                                   allowCashAddress, scriptHash)) {
+                                   cashAddressPrefix, scriptHash)) {
     error = "INVALID ADDRESS";
     return false;
   }
   for (size_t i = 0; i < N; ++i) {
-    if (queryElectrum(servers[i], scriptHash, balance, error)) return true;
+    if (queryElectrum(servers[i], scriptHash, baseUnitsPerCoin, balance,
+                      error)) {
+      return true;
+    }
     if (i + 1 < N) vTaskDelay(pdMS_TO_TICKS(100));
   }
   return false;
@@ -628,6 +652,25 @@ HeliosBalanceSnapshot HeliosBalances::get(HeliosCoin coin) const {
   result = snapshots_[heliosCoinIndex(coin)];
   xSemaphoreGive(mutex_);
   return result;
+}
+
+double HeliosBalances::fiatTotal(uint8_t currency, bool& available) const {
+  available = false;
+  if (!mutex_) return 0.0;
+  double total = 0.0;
+  xSemaphoreTake(mutex_, portMAX_DELAY);
+  for (size_t i = 0; i < HELIOS_COIN_COUNT; ++i) {
+    const HeliosBalanceSnapshot& snapshot = snapshots_[i];
+    if (!snapshot.available || !snapshot.pricesAvailable) continue;
+    double price = currency == 1 ? snapshot.priceCad
+                                 : currency == 2 ? snapshot.priceGbp
+                                                 : snapshot.priceUsd;
+    if (!isfinite(snapshot.balance) || !isfinite(price)) continue;
+    total += snapshot.balance * price;
+    available = true;
+  }
+  xSemaphoreGive(mutex_);
+  return total;
 }
 
 void HeliosBalances::taskEntry(void* argument) {
@@ -823,7 +866,7 @@ bool HeliosBalances::fetchBalance(HeliosCoin coin, const String& wallet,
   String fallbackError;
   switch (coin) {
     case HeliosCoin::CHTA:
-      return getElectrumBalance(wallet, 28, 5, false,
+      return getElectrumBalance(wallet, 28, 5, nullptr, 100000000.0,
                                 CHTA_ELECTRUM_SERVERS, balance, error);
 
     case HeliosCoin::WJK:
@@ -852,11 +895,15 @@ bool HeliosBalances::fetchBalance(HeliosCoin coin, const String& wallet,
           parseHaskoin(payload, balance)) {
         return true;
       }
-      if (getElectrumBalance(wallet, 0, 5, true, BCH_ELECTRUM_SERVERS,
-                             balance, fallbackError)) {
+      if (getElectrumBalance(wallet, 0, 5, "bitcoincash", 100000000.0,
+                             BCH_ELECTRUM_SERVERS, balance, fallbackError)) {
         return true;
       }
       break;
+
+    case HeliosCoin::XEC:
+      return getElectrumBalance(wallet, 0, 5, "ecash", 100.0,
+                                XEC_ELECTRUM_SERVERS, balance, error);
 
     case HeliosCoin::BTC:
       if (getPayload("https://blockstream.info/api/address/" + wallet, true,

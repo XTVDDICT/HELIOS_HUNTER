@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.9 - 2026-10-08
+
+- Add eCash (`XEC`) to both display versions with its official logo, HeliosPool
+  `xec.heliospool.com:3339` profile, wallet balance, fiat value, web tab,
+  rear-LED color, and balance-increase notification support.
+- Place XEC between DGB and BCH while preserving all existing persistent coin
+  indexes and saved settings.
+- Show the selected-currency total wallet value on the main screen with brighter,
+  bolder HeliosPool-themed styling.
+- Keep the pool host and port together as a single `host:port` endpoint on the
+  main screen.
+
 ## v1.0.8 - 2026-10-02
 
 - Add a FixedCoin (`FIX`) balance page, web tab, official logo, fiat values,

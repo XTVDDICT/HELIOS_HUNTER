@@ -40,6 +40,7 @@ class HeliosBalances {
   void requestRefresh(HeliosCoin coin);
   void acknowledgeIncrease(HeliosCoin coin, uint32_t sequence);
   HeliosBalanceSnapshot get(HeliosCoin coin) const;
+  double fiatTotal(uint8_t currency, bool& available) const;
 
  private:
   static void taskEntry(void* argument);

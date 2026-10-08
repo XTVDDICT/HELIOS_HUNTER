@@ -39,7 +39,7 @@ WifiCredentialState wifiCredentialState = WifiCredentialState::Unavailable;
 
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 10000U;
 constexpr uint8_t WIFI_RECONNECTS_BEFORE_RESTART = 6;
-constexpr char BUILD_ID[] = "R17_UI_NETWORK_20261002";
+constexpr char BUILD_ID[] = "R20_XEC_20261008";
 
 HeliosMiningConfig miningConfig() {
   const HeliosSettingsData& saved = settings.data();

@@ -16,6 +16,7 @@ constexpr uint16_t WHITE = 0xFFFF;
 constexpr uint16_t MUTED = 0xAD55;
 constexpr uint16_t HELIOS_GREEN = 0x47E9;
 constexpr uint16_t HELIOS_AMBER = 0xFCC0;
+constexpr uint16_t HELIOS_YELLOW = 0xFFE0;
 constexpr uint16_t SUCCESS = 0x4E89;
 constexpr uint16_t DANGER = 0xF2A6;
 constexpr uint32_t STATS_REFRESH_MS = 2000;
@@ -131,6 +132,8 @@ PngAsset coinLogo(HeliosCoin coin) {
       return {BTC_LOGO, BTC_LOGO_SIZE};
     case HeliosCoin::FIX:
       return {FIX_LOGO, FIX_LOGO_SIZE};
+    case HeliosCoin::XEC:
+      return {XEC_LOGO, XEC_LOGO_SIZE};
   }
   return {BTC_LOGO, BTC_LOGO_SIZE};
 }
@@ -255,11 +258,23 @@ void HeliosDisplay::drawHome(const HeliosMiningStats& stats) {
   display.fillRoundRect(4, 116, 312, 48, 4, PANEL);
   display.setTextColor(MUTED, PANEL);
   display.drawString("MINING POOL", 12, 123, 1);
+  display.setTextDatum(lgfx::top_right);
+  display.setTextColor(HELIOS_AMBER, PANEL);
+  display.drawString("TOTAL BAL", 308, 123, 1);
+  display.drawFastVLine(216, 122, 36, PANEL_LIGHT);
+  String portSuffix = ":" + String(cfg.miningPoolPort);
+  String poolEndpoint = cfg.miningPoolHost + portSuffix;
+  uint8_t poolFont = poolEndpoint.length() <= 24 ? 2 : 1;
+  if (poolEndpoint.length() > 33) {
+    size_t prefixLength = 33 > portSuffix.length() + 3
+                              ? 33 - portSuffix.length() - 3
+                              : 1;
+    poolEndpoint = cfg.miningPoolHost.substring(0, prefixLength) + "..." +
+                   portSuffix;
+  }
+  display.setTextDatum(lgfx::top_left);
   display.setTextColor(HELIOS_GREEN, PANEL);
-  display.drawString(cfg.miningPoolHost, 12, 140, 2);
-  display.setTextDatum(lgfx::middle_right);
-  display.setTextColor(WHITE, PANEL);
-  display.drawString(String(cfg.miningPoolPort), 308, 146, 1);
+  display.drawString(poolEndpoint, 12, poolFont == 2 ? 140 : 143, poolFont);
 
   display.fillRoundRect(4, 168, 153, 50, 4, PANEL);
   display.fillRoundRect(163, 168, 153, 50, 4, PANEL);
@@ -284,6 +299,17 @@ void HeliosDisplay::drawHomeValues(const HeliosMiningStats& stats) {
   display.setTextDatum(lgfx::top_right);
   display.setTextColor(HELIOS_AMBER, BLACK);
   display.drawString(String(stats.blocksFound), 169, 91, 2);
+  uint8_t currency = settings_->data().fiatCurrency;
+  const char* currencySymbol =
+      currency == 1 ? "C$" : currency == 2 ? "\xC2\xA3" : "$";
+  bool totalAvailable = false;
+  double total = balances_ ? balances_->fiatTotal(currency, totalAvailable) : 0.0;
+  String totalText =
+      totalAvailable ? String(currencySymbol) + fiatText(total) : "--";
+  display.fillRect(220, 139, 88, 20, PANEL);
+  display.setTextColor(HELIOS_YELLOW, PANEL);
+  display.drawString(totalText, 308, 140, 2);
+  display.drawString(totalText, 307, 140, 2);
   display.setTextDatum(lgfx::top_left);
   drawValue(12, 190, 137, String(stats.bestDifficulty, 4), WHITE, PANEL);
   display.fillRect(171, 190, 137, 18, PANEL);

@@ -2,7 +2,7 @@
 
 ![HeliosPool logo](assets/heliospool-main.png)
 
-HELIOS_HUNTER is multi-coin mining firmware for the ESP32 Cheap Yellow Display. It combines an independent SHA-256d Stratum miner with balance pages for Cheetahcoin, WojakCoin, DigiByte, Bitcoin Cash, Bitcoin, and FixedCoin.
+HELIOS_HUNTER is multi-coin mining firmware for the ESP32 Cheap Yellow Display. It combines an independent SHA-256d Stratum miner with balance pages for Cheetahcoin, WojakCoin, FixedCoin, DigiByte, eCash, Bitcoin Cash, and Bitcoin.
 
 ## Independent Project
 
@@ -12,19 +12,22 @@ For support, I can be reached in the `SOLO_HUNTER` channel of the HeliosPool Dis
 
 Two display versions are available:
 
-- `HELIOS_HUNTER_ILI9341_v1.0.8_merged.bin` for ILI9341 panels
-- `HELIOS_HUNTER_ST7789_v1.0.8_merged.bin` for ST7789 panels
+- `HELIOS_HUNTER_ILI9341_v1.0.9_merged.bin` for ILI9341 panels
+- `HELIOS_HUNTER_ST7789_v1.0.9_merged.bin` for ST7789 panels
 
 Use only the firmware version that matches the display controller in your CYD.
 
-## What's New in v1.0.8
+## What's New in v1.0.9
 
-- Added FixedCoin (`FIX`) throughout both display versions, including its balance page, web tab, fiat value, logo, rear-LED color, and balance-increase alerts.
-- Improved touchscreen and web-dashboard responsiveness by buffering status output and preventing overlapping dashboard requests.
-- Reduced balance-update memory pressure and kept the last confirmed balance visible during temporary explorer or network failures.
-- Setup mode now opens only when Wi-Fi credentials are actually missing; temporary connection failures stay in retry mode.
-- Preserved the validated FAST SHA engine and its measured instruction layout, with observed peaks around **920 kH/s** on tested CYDs.
-- Kept persistent touch-to-clear balance notifications, diagnostics, and the more visible **BLOCKS** counter.
+- Added eCash (`XEC`) to both display versions with its balance page, web tab,
+  fiat value, official logo, rear-LED color, and balance-increase alerts.
+- Added XEC cash-address support and resilient balance lookups through the
+  official Electrum ABC server list.
+- Updated the screen order to CHTA, WJK, FIX, DGB, XEC, BCH, BTC.
+- Added a brighter total wallet value to the main screen and joined the active
+  pool host and port into one `host:port` line.
+- Preserved the validated FAST SHA mining engine and existing saved-setting
+  indexes.
 
 Pool reconnects can still occur, and long-term restart stability remains under observation. This release does not promise zero watchdog resets. See [CHANGELOG.md](CHANGELOG.md) for details.
 
@@ -33,7 +36,7 @@ Pool reconnects can still occur, and long-term restart stability remains under o
 - Hardware-accelerated ESP32 SHA-256d mining
 - User-configurable pool, port, username, worker, and password
 - Mining remains independent from the selected balance screen
-- Screen order: HeliosPool, CHTA, WJK, FIX, DGB, BCH, BTC
+- Screen order: HeliosPool, CHTA, WJK, FIX, DGB, XEC, BCH, BTC
 - Swipe navigation and matching rear-LED colors
 - Live hashrate, accepted/rejected shares, and best difficulty on every page
 - Address balances and a selectable USD, CAD, or GBP value
@@ -49,32 +52,50 @@ HELIOS_HUNTER is designed for the:
 - ILI9341 or ST7789 320x240 display
 - XPT2046 touch controller
 
-## Firmware Installation
+## New Installation
 
-HELIOS_HUNTER is provided as a ready-to-flash merged ESP32 firmware image. Arduino IDE is **not required** to install the firmware.
+Use this method for a new device, recovery, switching from unrelated firmware,
+or whenever the existing partition layout is unknown. Arduino IDE is **not
+required**.
 
 Download the merged `.bin` file that matches your display from the [latest GitHub release](https://github.com/XTVDDICT/HELIOS_HUNTER/releases/latest):
 
-- `HELIOS_HUNTER_ILI9341_v1.0.8_merged.bin`
-- `HELIOS_HUNTER_ST7789_v1.0.8_merged.bin`
-
-### Flashing
+- `HELIOS_HUNTER_ILI9341_v1.0.9_merged.bin`
+- `HELIOS_HUNTER_ST7789_v1.0.9_merged.bin`
 
 Use an ESP32-compatible flashing tool and connect the CYD to your computer with USB.
 
-Flash the selected merged firmware file at:
+1. Select the merged file matching the CYD's ILI9341 or ST7789 screen.
+2. Flash it at `0x0000`.
+3. Restart the device and complete `HELIOS_HUNTER_SETUP` when prompted.
 
-`0x0000`
+The merged image contains the bootloader, partition table, boot application
+data, and HELIOS_HUNTER application. Do not assign additional offsets or flash
+the app-only update file during a new installation.
 
-Because the provided file is a **merged firmware image**, the bootloader, partition table, boot application data, and HELIOS_HUNTER firmware are already contained in a single file.
+## Update Without Losing Settings
 
-You do not need to manually flash separate files at `0x1000`, `0x8000`, `0xE000`, or `0x10000`.
+Use this method only on a device already running HELIOS_HUNTER with the Huge APP
+partition layout.
+
+Download the update file matching the device's screen:
+
+- `HELIOS_HUNTER_ILI9341_v1.0.9_update.bin`
+- `HELIOS_HUNTER_ST7789_v1.0.9_update.bin`
+
+1. In the ESP32 flasher, select only the matching `_update.bin` file.
+2. Set its flash address to `0x10000`.
+3. Set **Erase Flash** to **No Erase**, or disable full-chip erase.
+4. Flash the update and restart the device.
+
+The update image replaces only the application. It leaves the NVS settings at
+`0x9000` untouched, preserving Wi-Fi, mining, wallet, currency, brightness,
+LED, sleep, and rotation settings. Do not use this method if the flasher cannot
+select `0x10000` and disable erase.
 
 ### Important
 
-Make sure you use the correct firmware for your display controller.
-
-Back up your Wi-Fi, mining, and balance-address settings before updating. Flashing a merged image can clear saved settings.
+Always use the firmware matching the display controller:
 
 - ILI9341 display → use the ILI9341 firmware
 - ST7789 display → use the ST7789 firmware
@@ -117,6 +138,7 @@ The firmware checks:
 - Cheetahcoin (CHTA)
 - WojakCoin (WJK)
 - DigiByte (DGB)
+- eCash (XEC)
 - Bitcoin Cash (BCH)
 - Bitcoin (BTC)
 - FixedCoin (FIX)

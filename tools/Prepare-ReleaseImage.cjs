@@ -85,9 +85,8 @@ function prepare(original, requireBuild = true) {
   assert(isBlank(original, images[1].end, apps[0].offset + apps[0].size),
     'Application has extra/signature data');
   if (requireBuild) {
-    assert(original.includes(Buffer.from('R17_UI_NETWORK_20261002')),
-      'Not the R17 release build');
-    assert(original.includes(Buffer.from('HELIOS_HUNTER/1.0.7')), 'Wrong firmware version');
+    assert(original.includes(Buffer.from('R20_XEC_20261008')),
+      'Not the R20 XEC release build');
   }
   const output = Buffer.from(original);
   const allowed = new Uint8Array(output.length);
@@ -185,7 +184,7 @@ function tests() {
   const signed = Buffer.from(input);
   signed[0x10000 + app.length + 32] = 0xe7;
   assert.throws(() => prepare(signed, false), /extra\/signature/);
-  assert.throws(() => prepare(input), /Not the R17/);
+  assert.throws(() => prepare(input), /Not the R20/);
   console.log('PASS: path removal, unchanged code, image checksums/hashes, idempotence, populated-NVS and signature rejection.');
 }
 

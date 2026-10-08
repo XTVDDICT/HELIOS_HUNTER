@@ -102,7 +102,7 @@ Both screen versions use identical artwork, so their generated
 ## Prepare a Public Release Copy
 
 Compiled libraries may embed your local computer paths in assertion/debug
-strings even when no wallet or Wi-Fi settings are compiled in. The v1.0.8
+strings even when no wallet or Wi-Fi settings are compiled in. The v1.0.9
 release copies use the included Node.js tool to remove those personal prefixes:
 
 ```text
@@ -110,7 +110,7 @@ node tools/Prepare-ReleaseImage.cjs input.merged.bin output.merged.bin
 node tools/Prepare-ReleaseImage.cjs --test
 ```
 
-This tool is pinned to the R17/v1.0.8 build. It accepts only a 4 MB merged image
+This tool is pinned to the R20/v1.0.9 build. It accepts only a 4 MB merged image
 with one application partition and blank user-data partitions. It modifies
 read-only debug-path prefixes only, preserves string lengths and executable
 instructions, and regenerates and checks the ESP32 checksum/SHA-256 footers.

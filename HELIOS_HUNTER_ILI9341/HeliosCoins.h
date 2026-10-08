@@ -9,6 +9,7 @@ enum class HeliosCoin : uint8_t {
   BCH,
   BTC,
   FIX,
+  XEC,
   Count
 };
 
