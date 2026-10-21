@@ -102,19 +102,21 @@ Both screen versions use identical artwork, so their generated
 ## Prepare a Public Release Copy
 
 Compiled libraries may embed your local computer paths in assertion/debug
-strings even when no wallet or Wi-Fi settings are compiled in. The v1.0.9
+strings even when no wallet or Wi-Fi settings are compiled in. The v1.0.10
 release copies use the included Node.js tool to remove those personal prefixes:
 
 ```text
-node tools/Prepare-ReleaseImage.cjs input.merged.bin output.merged.bin
+node tools/Prepare-ReleaseImage.cjs input.merged.bin output.merged.bin output.update.bin
 node tools/Prepare-ReleaseImage.cjs --test
 ```
 
-This tool is pinned to the R20/v1.0.9 build. It accepts only a 4 MB merged image
+This tool is pinned to the R21/v1.0.10 build. It accepts only a 4 MB merged image
 with one application partition and blank user-data partitions. It modifies
 read-only debug-path prefixes only, preserves string lengths and executable
 instructions, and regenerates and checks the ESP32 checksum/SHA-256 footers.
 Signed images, configured-device dumps, and unexpected formats are rejected.
+When an update destination is supplied, it also extracts the sanitized app
+image for settings-preserving flashing at `0x10000`.
 It does not compile, export through Arduino, connect to hardware, or flash.
 
 Check the prepared image with Espressif's image tools, scan for personal data,

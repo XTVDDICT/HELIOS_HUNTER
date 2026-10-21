@@ -32,16 +32,17 @@ constexpr uint8_t ALL_COINS_MASK = (1U << HELIOS_COIN_COUNT) - 1U;
 constexpr const char* BALANCE_STATE_NAMESPACE = "heliosbal";
 constexpr const char* BALANCE_WALLET_KEYS[HELIOS_COIN_COUNT] = {
     "wallet0", "wallet1", "wallet2", "wallet3", "wallet4", "wallet5",
-    "wallet6"};
+    "wallet6", "wallet7"};
 constexpr const char* BALANCE_VALUE_KEYS[HELIOS_COIN_COUNT] = {
     "balance0", "balance1", "balance2", "balance3", "balance4", "balance5",
-    "balance6"};
+    "balance6", "balance7"};
 constexpr const char* PENDING_VALUE_KEYS[HELIOS_COIN_COUNT] = {
     "pending0", "pending1", "pending2", "pending3", "pending4", "pending5",
-    "pending6"};
+    "pending6", "pending7"};
 constexpr const char* PRICE_IDS[HELIOS_COIN_COUNT] = {
     "chta-cheetahcoin", "wjk-wojakcoin", "dgb-digibyte",
-    "bch-bitcoin-cash", "btc-bitcoin", "fix-fixedcoin", "xec-ecash"};
+    "bch-bitcoin-cash", "btc-bitcoin", "fix-fixedcoin", "xec-ecash",
+    "zec-zcash"};
 
 struct ElectrumServer {
   const char* host;
@@ -241,6 +242,19 @@ bool parseHaskoin(const String& payload, double& balance) {
                      document["unconfirmed"].as<int64_t>();
   balance = static_cast<double>(satoshis) / 100000000.0;
   return true;
+}
+
+bool parseZecBlock(const String& payload, double& balance) {
+  JsonDocument document;
+  if (deserializeJson(document, payload)) return false;
+  const char* balanceZat = document["data"]["balanceZat"];
+  if (!balanceZat || !balanceZat[0]) return false;
+
+  char* end = nullptr;
+  unsigned long long zatoshis = strtoull(balanceZat, &end, 10);
+  if (end == balanceZat || *end != '\0') return false;
+  balance = static_cast<double>(zatoshis) / 100000000.0;
+  return isfinite(balance) && balance >= 0.0;
 }
 
 bool sha256Bytes(const uint8_t* data, size_t length, uint8_t output[32]) {
@@ -904,6 +918,19 @@ bool HeliosBalances::fetchBalance(HeliosCoin coin, const String& wallet,
     case HeliosCoin::XEC:
       return getElectrumBalance(wallet, 0, 5, "ecash", 100.0,
                                 XEC_ELECTRUM_SERVERS, balance, error);
+
+    case HeliosCoin::ZEC:
+      if (!wallet.startsWith("t1") && !wallet.startsWith("t3")) {
+        error = "T-ADDRESS ONLY";
+        return false;
+      }
+      if (getPayload("https://api.zecblock.com/v1/addresses/" + wallet +
+                         "?limit=1",
+                     true, payload, primaryError) &&
+          parseZecBlock(payload, balance)) {
+        return true;
+      }
+      break;
 
     case HeliosCoin::BTC:
       if (getPayload("https://blockstream.info/api/address/" + wallet, true,

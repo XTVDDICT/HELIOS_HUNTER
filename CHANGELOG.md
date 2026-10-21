@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.0.10 - 2026-10-21
+
+- Add Zcash (`ZEC`) balance monitoring to both display versions with the
+  official Zcash logo, USD/CAD/GBP value, web tab, rear-LED color, cached
+  balance, and balance-increase notification support.
+- Add the HeliosPool ZEC profile at `zec.heliospool.com:3340` and place ZEC
+  between XEC and BCH without changing any existing coin's persistent index.
+- Limit ZEC explorer responses to one transaction entry to reduce network and
+  heap pressure on the ESP32.
+- Loop touchscreen navigation in both directions: swiping forward from BTC
+  returns to the HeliosPool home page, and swiping backward from Home opens BTC.
+- ZEC tracking accepts public transparent `t1`/`t3` addresses. The existing
+  SHA-256d mining engine does not mine Zcash's Equihash algorithm.
+
 ## v1.0.9 - 2026-10-08
 
 - Add eCash (`XEC`) to both display versions with its official logo, HeliosPool

@@ -18,12 +18,15 @@ constexpr HeliosCoinProfile PROFILES[HELIOS_COIN_COUNT] = {
      0xFDC0},
     {HeliosCoin::XEC, "XEC", "eCash", "xec.heliospool.com", 3339,
      0x051C},
+    {HeliosCoin::ZEC, "ZEC", "Zcash", "zec.heliospool.com", 3340,
+     0xF5A5},
 };
 
 // Keep persistent enum indexes stable while presenting the requested order.
 constexpr HeliosCoin DISPLAY_ORDER[HELIOS_COIN_COUNT] = {
     HeliosCoin::CHTA, HeliosCoin::WJK, HeliosCoin::FIX,
-    HeliosCoin::DGB, HeliosCoin::XEC, HeliosCoin::BCH, HeliosCoin::BTC};
+    HeliosCoin::DGB, HeliosCoin::XEC, HeliosCoin::ZEC,
+    HeliosCoin::BCH, HeliosCoin::BTC};
 
 }  // namespace
 

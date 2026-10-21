@@ -85,8 +85,8 @@ function prepare(original, requireBuild = true) {
   assert(isBlank(original, images[1].end, apps[0].offset + apps[0].size),
     'Application has extra/signature data');
   if (requireBuild) {
-    assert(original.includes(Buffer.from('R20_XEC_20261008')),
-      'Not the R20 XEC release build');
+    assert(original.includes(Buffer.from('R21_ZEC_LOOP_20261017')),
+      'Not the R21 ZEC loop build');
   }
   const output = Buffer.from(original);
   const allowed = new Uint8Array(output.length);
@@ -184,7 +184,7 @@ function tests() {
   const signed = Buffer.from(input);
   signed[0x10000 + app.length + 32] = 0xe7;
   assert.throws(() => prepare(signed, false), /extra\/signature/);
-  assert.throws(() => prepare(input), /Not the R20/);
+  assert.throws(() => prepare(input), /Not the R21/);
   console.log('PASS: path removal, unchanged code, image checksums/hashes, idempotence, populated-NVS and signature rejection.');
 }
 
@@ -192,17 +192,28 @@ if (require.main === module) {
   if (process.argv[2] === '--test') {
     tests();
   } else {
-    const [source, destination] = process.argv.slice(2);
-    assert(source && destination, 'Usage: node Prepare-ReleaseImage.cjs input-merged.bin output-merged.bin');
+    const [source, destination, updateDestination] = process.argv.slice(2);
+    assert(source && destination,
+      'Usage: node Prepare-ReleaseImage.cjs input-merged.bin output-merged.bin [output-update.bin]');
     assert(source !== destination, 'Do not overwrite the original image');
+    assert(!updateDestination || (updateDestination !== source &&
+      updateDestination !== destination), 'Update output must be a separate file');
     const original = fs.readFileSync(source);
     const result = prepare(original);
     fs.writeFileSync(destination, result.output, { flag: 'wx' });
+    let updateBytes = 0;
+    if (updateDestination) {
+      const app = result.images[1];
+      const update = result.output.subarray(app.offset, app.end);
+      fs.writeFileSync(updateDestination, update, { flag: 'wx' });
+      updateBytes = update.length;
+    }
     console.log(JSON.stringify({
       patchedDebugPaths: result.patchedPaths,
       originalSha256: digest(original).toString('hex'),
       releaseSha256: digest(result.output).toString('hex'),
       bytes: result.output.length,
+      updateBytes,
       blankNvs: true,
       instructionsUnchanged: true,
       imageIntegrityValid: true

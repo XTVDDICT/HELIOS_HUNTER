@@ -18,6 +18,7 @@ ASSETS = (
     ("BTC_LOGO", "btc.png", (72, 72), False),
     ("FIX_LOGO", "fix.png", (72, 72), False),
     ("XEC_LOGO", "xec.png", (72, 72), False),
+    ("ZEC_LOGO", "zec.png", (72, 72), False),
 )
 
 

@@ -6,13 +6,14 @@ namespace {
 
 constexpr const char* NAMESPACE_NAME = "helioshunter";
 constexpr const char* WALLET_KEYS[HELIOS_COIN_COUNT] = {
-    "w_chta", "w_wjk", "w_dgb", "w_bch", "w_btc", "w_fix", "w_xec"};
+    "w_chta", "w_wjk", "w_dgb", "w_bch", "w_btc", "w_fix", "w_xec",
+    "w_zec"};
 constexpr const char* LEGACY_POOL_HOST_KEYS[HELIOS_COIN_COUNT] = {
     "ph_chta", "ph_wjk", "ph_dgb", "ph_bch", "ph_btc", "ph_fix",
-    "ph_xec"};
+    "ph_xec", "ph_zec"};
 constexpr const char* LEGACY_POOL_PORT_KEYS[HELIOS_COIN_COUNT] = {
     "pp_chta", "pp_wjk", "pp_dgb", "pp_bch", "pp_btc", "pp_fix",
-    "pp_xec"};
+    "pp_xec", "pp_zec"};
 
 String cleaned(String value, size_t maximumLength) {
   value.trim();

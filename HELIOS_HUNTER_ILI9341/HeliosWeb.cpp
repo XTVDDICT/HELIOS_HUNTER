@@ -12,7 +12,7 @@
 
 namespace {
 
-constexpr char FIRMWARE_BUILD[] = "R20_XEC_20261008";
+constexpr char FIRMWARE_BUILD[] = "R21_ZEC_LOOP_20261017";
 
 class BufferedNetworkWriter : public Print {
  public:

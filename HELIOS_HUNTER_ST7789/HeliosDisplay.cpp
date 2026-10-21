@@ -134,6 +134,8 @@ PngAsset coinLogo(HeliosCoin coin) {
       return {FIX_LOGO, FIX_LOGO_SIZE};
     case HeliosCoin::XEC:
       return {XEC_LOGO, XEC_LOGO_SIZE};
+    case HeliosCoin::ZEC:
+      return {ZEC_LOGO, ZEC_LOGO_SIZE};
   }
   return {BTC_LOGO, BTC_LOGO_SIZE};
 }
@@ -593,17 +595,20 @@ void HeliosDisplay::handleTouch() {
   int32_t dy = touchLastY_ - touchStartY_;
   int32_t primaryDelta = abs(dx) >= abs(dy) ? dx : dy;
   if (abs(primaryDelta) >= SWIPE_DISTANCE) {
-    if (primaryDelta < 0 && page_ < HELIOS_COIN_COUNT) ++page_;
-    if (primaryDelta > 0 && page_ > 0) --page_;
+    if (primaryDelta < 0) {
+      page_ = page_ < HELIOS_COIN_COUNT ? page_ + 1 : 0;
+    } else {
+      page_ = page_ > 0 ? page_ - 1 : HELIOS_COIN_COUNT;
+    }
     draw(true);
     return;
   }
 
-  if (touchLastX_ > 2400 && page_ < HELIOS_COIN_COUNT) {
-    ++page_;
+  if (touchLastX_ > 2400) {
+    page_ = page_ < HELIOS_COIN_COUNT ? page_ + 1 : 0;
     draw(true);
-  } else if (touchLastX_ < 1600 && page_ > 0) {
-    --page_;
+  } else if (touchLastX_ < 1600) {
+    page_ = page_ > 0 ? page_ - 1 : HELIOS_COIN_COUNT;
     draw(true);
   }
 

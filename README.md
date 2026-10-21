@@ -2,7 +2,7 @@
 
 ![HeliosPool logo](assets/heliospool-main.png)
 
-HELIOS_HUNTER is multi-coin mining firmware for the ESP32 Cheap Yellow Display. It combines an independent SHA-256d Stratum miner with balance pages for Cheetahcoin, WojakCoin, FixedCoin, DigiByte, eCash, Bitcoin Cash, and Bitcoin.
+HELIOS_HUNTER is multi-coin mining firmware for the ESP32 Cheap Yellow Display. It combines an independent SHA-256d Stratum miner with balance pages for Cheetahcoin, WojakCoin, FixedCoin, DigiByte, eCash, Zcash, Bitcoin Cash, and Bitcoin.
 
 ## Independent Project
 
@@ -12,22 +12,23 @@ For support, I can be reached in the `SOLO_HUNTER` channel of the HeliosPool Dis
 
 Two display versions are available:
 
-- `HELIOS_HUNTER_ILI9341_v1.0.9_merged.bin` for ILI9341 panels
-- `HELIOS_HUNTER_ST7789_v1.0.9_merged.bin` for ST7789 panels
+- `HELIOS_HUNTER_ILI9341_v1.0.10_merged.bin` for ILI9341 panels
+- `HELIOS_HUNTER_ST7789_v1.0.10_merged.bin` for ST7789 panels
 
 Use only the firmware version that matches the display controller in your CYD.
 
-## What's New in v1.0.9
+## What's New in v1.0.10
 
-- Added eCash (`XEC`) to both display versions with its balance page, web tab,
-  fiat value, official logo, rear-LED color, and balance-increase alerts.
-- Added XEC cash-address support and resilient balance lookups through the
-  official Electrum ABC server list.
-- Updated the screen order to CHTA, WJK, FIX, DGB, XEC, BCH, BTC.
-- Added a brighter total wallet value to the main screen and joined the active
-  pool host and port into one `host:port` line.
-- Preserved the validated FAST SHA mining engine and existing saved-setting
-  indexes.
+- Added Zcash (`ZEC`) transparent-address balance monitoring to both display
+  versions with fiat value, official logo, web tab, rear-LED color, caching,
+  and balance-increase alerts.
+- Added the HeliosPool `zec.heliospool.com:3340` profile and placed ZEC between
+  XEC and BCH without moving any existing saved-setting indexes.
+- Added circular screen navigation: swiping forward from BTC returns to the
+  HeliosPool home screen, and swiping backward from Home opens BTC.
+- Limited ZEC explorer responses to reduce network traffic and ESP32 heap use.
+- Preserved the validated FAST SHA mining engine. ZEC monitoring is separate
+  from mining because Zcash uses Equihash rather than SHA-256d.
 
 Pool reconnects can still occur, and long-term restart stability remains under observation. This release does not promise zero watchdog resets. See [CHANGELOG.md](CHANGELOG.md) for details.
 
@@ -36,8 +37,8 @@ Pool reconnects can still occur, and long-term restart stability remains under o
 - Hardware-accelerated ESP32 SHA-256d mining
 - User-configurable pool, port, username, worker, and password
 - Mining remains independent from the selected balance screen
-- Screen order: HeliosPool, CHTA, WJK, FIX, DGB, XEC, BCH, BTC
-- Swipe navigation and matching rear-LED colors
+- Screen order: HeliosPool, CHTA, WJK, FIX, DGB, XEC, ZEC, BCH, BTC
+- Looping swipe navigation and matching rear-LED colors
 - Live hashrate, accepted/rejected shares, and best difficulty on every page
 - Address balances and a selectable USD, CAD, or GBP value
 - Block-found style notification when a tracked balance increases
@@ -60,8 +61,8 @@ required**.
 
 Download the merged `.bin` file that matches your display from the [latest GitHub release](https://github.com/XTVDDICT/HELIOS_HUNTER/releases/latest):
 
-- `HELIOS_HUNTER_ILI9341_v1.0.9_merged.bin`
-- `HELIOS_HUNTER_ST7789_v1.0.9_merged.bin`
+- `HELIOS_HUNTER_ILI9341_v1.0.10_merged.bin`
+- `HELIOS_HUNTER_ST7789_v1.0.10_merged.bin`
 
 Use an ESP32-compatible flashing tool and connect the CYD to your computer with USB.
 
@@ -80,8 +81,8 @@ partition layout.
 
 Download the update file matching the device's screen:
 
-- `HELIOS_HUNTER_ILI9341_v1.0.9_update.bin`
-- `HELIOS_HUNTER_ST7789_v1.0.9_update.bin`
+- `HELIOS_HUNTER_ILI9341_v1.0.10_update.bin`
+- `HELIOS_HUNTER_ST7789_v1.0.10_update.bin`
 
 1. In the ESP32 flasher, select only the matching `_update.bin` file.
 2. Set its flash address to `0x10000`.
@@ -139,11 +140,15 @@ The firmware checks:
 - WojakCoin (WJK)
 - DigiByte (DGB)
 - eCash (XEC)
+- Zcash (ZEC, transparent `t1`/`t3` addresses)
 - Bitcoin Cash (BCH)
 - Bitcoin (BTC)
 - FixedCoin (FIX)
 
 through multiple independent explorer or Electrum sources. The firmware refreshes periodically and automatically tries a fallback when a provider is unavailable. DigiByte public data may occasionally be delayed by its provider.
+
+The ZEC page tracks public transparent-address balances and fiat values. Zcash
+uses Equihash, so ZEC cannot be mined by HELIOS_HUNTER's SHA-256d engine.
 
 The balance-increase notification assumes an increase may represent a mined reward. Incoming transfers can also trigger the notification.
 
