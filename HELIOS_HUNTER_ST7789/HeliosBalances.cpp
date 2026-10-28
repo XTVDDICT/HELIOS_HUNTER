@@ -1,4 +1,7 @@
 #include "HeliosBalances.h"
+#include "HeliosDiagnostics.h"
+#include "HeliosNetworkMemory.h"
+#include "HeliosCooperativeTls.h"
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
@@ -16,38 +19,82 @@
 namespace {
 
 constexpr uint32_t REFRESH_INTERVAL_MS = 5UL * 60UL * 1000UL;
+constexpr uint32_t PRICE_RETRY_MS = 60000;
 constexpr uint32_t PRICE_CACHE_MS = 10UL * 60UL * 1000UL;
 constexpr uint32_t REQUEST_TIMEOUT_MS = 12000;
 constexpr uint8_t REQUEST_ATTEMPTS = 2;
 constexpr uint32_t ELECTRUM_TIMEOUT_MS = 6000;
+constexpr size_t MAX_ELECTRUM_LINE_BYTES = 4096;
 constexpr uint32_t BALANCE_NETWORK_SETTLE_MS = 20000;
 constexpr uint32_t BETWEEN_COIN_REQUESTS_MS = 5000;
 constexpr size_t MAX_HTTP_PAYLOAD_BYTES = 32768;
+
+// Bound incoming data before StreamString can allocate it. Content-Length can
+// be absent (or chunked), so checking the size only after reading is too late.
+class BoundedPayloadWriter : public Stream {
+ public:
+  explicit BoundedPayloadWriter(StreamString& payload)
+      : payload_(payload), startedAt_(millis()), yieldedAt_(startedAt_) {}
+  size_t write(uint8_t value) override { return write(&value, 1); }
+  size_t write(const uint8_t* data, size_t size) override {
+    if (error_) return 0;
+    if (payload_.length() > MAX_HTTP_PAYLOAD_BYTES ||
+        size > MAX_HTTP_PAYLOAD_BYTES - payload_.length()) {
+      error_ = "RESPONSE TOO LARGE";
+      return 0;
+    }
+    const uint32_t now = millis();
+    if (now - startedAt_ >= REQUEST_TIMEOUT_MS) {
+      error_ = "BODY TIMEOUT";
+      return 0;
+    }
+    if (now - yieldedAt_ >= 20U) {
+      vTaskDelay(1);
+      yieldedAt_ = millis();
+    }
+    const size_t written = payload_.write(data, size);
+    if (written != size) error_ = "LOW MEMORY";
+    return written;
+  }
+  int available() override { return 0; }
+  int read() override { return -1; }
+  int peek() override { return -1; }
+  void flush() override {}
+  const char* error() const { return error_; }
+ private:
+  StreamString& payload_;
+  uint32_t startedAt_;
+  uint32_t yieldedAt_;
+  const char* error_ = nullptr;
+};
 // Only suppress a request when the heap is critically low. TLS can operate
 // with fragmented heap on these CYDs, and each response allocation is checked
 // separately once its actual Content-Length is known.
 constexpr size_t MIN_REQUEST_FREE_HEAP = 24000;
 constexpr size_t MIN_REQUEST_LARGEST_BLOCK = 8192;
-constexpr uint8_t ALL_COINS_MASK = (1U << HELIOS_COIN_COUNT) - 1U;
+static_assert(HELIOS_COIN_COUNT <= 16, "Coin refresh mask capacity exceeded");
+constexpr uint16_t ALL_COINS_MASK = (1U << HELIOS_COIN_COUNT) - 1U;
 constexpr const char* BALANCE_STATE_NAMESPACE = "heliosbal";
 constexpr const char* BALANCE_WALLET_KEYS[HELIOS_COIN_COUNT] = {
-    "wallet0", "wallet1", "wallet2", "wallet3", "wallet4", "wallet5",
-    "wallet6", "wallet7"};
+    "wallet0", "wallet1", "wallet2", "wallet3", "wallet4", "wallet5", "wallet6", "wallet7", "wallet8"};
 constexpr const char* BALANCE_VALUE_KEYS[HELIOS_COIN_COUNT] = {
-    "balance0", "balance1", "balance2", "balance3", "balance4", "balance5",
-    "balance6", "balance7"};
+    "balance0", "balance1", "balance2", "balance3", "balance4", "balance5", "balance6", "balance7", "balance8"};
 constexpr const char* PENDING_VALUE_KEYS[HELIOS_COIN_COUNT] = {
-    "pending0", "pending1", "pending2", "pending3", "pending4", "pending5",
-    "pending6", "pending7"};
+    "pending0", "pending1", "pending2", "pending3", "pending4", "pending5", "pending6", "pending7", "pending8"};
 constexpr const char* PRICE_IDS[HELIOS_COIN_COUNT] = {
     "chta-cheetahcoin", "wjk-wojakcoin", "dgb-digibyte",
-    "bch-bitcoin-cash", "btc-bitcoin", "fix-fixedcoin", "xec-ecash",
-    "zec-zcash"};
+    "bch-bitcoin-cash", "btc-bitcoin", "fix-fixedcoin",
+    "xec-ecash", "zec-zcash", "grlc-garlicoin"};
 
 struct ElectrumServer {
   const char* host;
   uint16_t port;
 };
+
+// Current community servers, checked against the configured GRLC balance.
+constexpr ElectrumServer GRLC_ELECTRUM_SERVERS[] = {
+    {"electrum.maxpuig.com", 50001},
+    {"electrum.niftybakes.com", 50001}};
 
 bool loadStoredBalanceState(size_t index, const String& wallet,
                             double& balance, double& pendingIncrease) {
@@ -75,6 +122,7 @@ bool loadStoredBalanceState(size_t index, const String& wallet,
 
 void saveStoredBalanceState(size_t index, const String& wallet,
                             double balance, double pendingIncrease) {
+  heliosMarkBalance(HeliosBalanceStage::Storage);
   if (wallet.isEmpty() || !isfinite(balance) || balance < 0.0) return;
   Preferences prefs;
   if (!prefs.begin(BALANCE_STATE_NAMESPACE, false)) return;
@@ -89,6 +137,7 @@ void saveStoredBalanceState(size_t index, const String& wallet,
 }
 
 void clearStoredPendingIncrease(size_t index, const String& wallet) {
+  heliosMarkBalance(HeliosBalanceStage::Storage);
   if (wallet.isEmpty()) return;
   Preferences prefs;
   if (!prefs.begin(BALANCE_STATE_NAMESPACE, false)) return;
@@ -108,11 +157,11 @@ constexpr ElectrumServer BCH_ELECTRUM_SERVERS[] = {
     {"bch.electrum2.cipig.net", 10055},
     {"bch.electrum3.cipig.net", 10055}};
 
+// Mainnet servers published by Electrum ABC. Prefer the live-tested server.
 constexpr ElectrumServer XEC_ELECTRUM_SERVERS[] = {
-    {"electrum.bitcoinabc.org", 50001},
-    {"electrum.fabien.cash", 50001},
     {"fulcrum.pierre.cash", 50001},
-    {"electrum.pierre.cash", 50001}};
+    {"electrum.bitcoinabc.org", 50001},
+    {"electrum.fabien.cash", 50001}};
 
 bool parseNumber(String payload, double& value) {
   payload.trim();
@@ -136,8 +185,14 @@ bool requestMemoryAvailable(String& error) {
 
 bool getPayloadOnce(const String& url, bool secure, StreamString& payload,
                      String& error) {
+  heliosMarkBalance(HeliosBalanceStage::HttpRequest);
   if (!requestMemoryAvailable(error)) return false;
 
+  // HTTPClient borrows its transport and may still call stop() in its
+  // destructor after end() on a failed/disconnected request. Local objects
+  // are destroyed in reverse declaration order: transports must outlive http.
+  WiFiClient client;
+  HeliosCooperativeTls tls(REQUEST_TIMEOUT_MS);
   HTTPClient http;
   http.setConnectTimeout(8000);
   http.setTimeout(REQUEST_TIMEOUT_MS);
@@ -146,8 +201,6 @@ bool getPayloadOnce(const String& url, bool secure, StreamString& payload,
   http.setReuse(false);
   http.useHTTP10(true);
 
-  WiFiClient client;
-  WiFiClientSecure tls;
   bool started = false;
   if (secure) {
     tls.setInsecure();
@@ -158,6 +211,7 @@ bool getPayloadOnce(const String& url, bool secure, StreamString& payload,
   }
   if (!started) {
     error = "START FAILED";
+    http.end();
     return false;
   }
 
@@ -183,7 +237,14 @@ bool getPayloadOnce(const String& url, bool secure, StreamString& payload,
     http.end();
     return false;
   }
-  int bytesRead = http.writeToStream(&payload);
+  heliosMarkBalance(HeliosBalanceStage::HttpBody);
+  BoundedPayloadWriter writer(payload);
+  int bytesRead = http.writeToStream(&writer);
+  if (writer.error()) {
+    error = writer.error();
+    http.end();
+    return false;
+  }
   if (bytesRead < 0) {
     error = String("NET ") + bytesRead;
     http.end();
@@ -208,10 +269,30 @@ bool getPayload(const String& url, bool secure, StreamString& payload,
                 String& error) {
   for (uint8_t attempt = 0; attempt < REQUEST_ATTEMPTS; ++attempt) {
     payload.clear();
-    if (getPayloadOnce(url, secure, payload, error)) return true;
+    if (getPayloadOnce(url, secure, payload, error)) {
+      heliosMarkBalance(HeliosBalanceStage::Parsing);
+      return true;
+    }
     if (attempt + 1 < REQUEST_ATTEMPTS) vTaskDelay(pdMS_TO_TICKS(350));
   }
   return false;
+}
+
+bool parseGarlicoin(const String& payload, double& balance) {
+  JsonDocument document;
+  JsonDocument filter;
+  filter["balance"] = true;
+  filter["error"] = true;
+  if (deserializeJson(document, payload, DeserializationOption::Filter(filter)) ||
+      !document["error"].isNull() || !document["balance"].is<double>()) {
+    return false;
+  }
+  // addr.php?api=1&op=balance reports native GRLC, unlike the explorer's
+  // separate lite_api_balance endpoint, which reports atomic units.
+  const double amount = document["balance"].as<double>();
+  if (!isfinite(amount) || amount < 0 || amount > 69000000.0) return false;
+  balance = amount;
+  return true;
 }
 
 bool parseElectrs(const String& payload, double& balance) {
@@ -231,6 +312,58 @@ bool parseElectrs(const String& payload, double& balance) {
   return true;
 }
 
+// ZecBlock balances are atomic-unit counts.
+bool parseAtomicAmount(JsonVariantConst value, double units, double& amount) {
+  uint64_t atomic = 0;
+  if (value.is<const char*>()) {
+    const char* text = value.as<const char*>();
+    if (!text || !*text) return false;
+    for (; *text; ++text) {
+      if (*text < '0' || *text > '9') return false;
+      uint8_t digit = static_cast<uint8_t>(*text - '0');
+      if (atomic > (UINT64_MAX - digit) / 10U) return false;
+      atomic = atomic * 10U + digit;
+    }
+  } else if (value.is<uint64_t>()) {
+    atomic = value.as<uint64_t>();
+  } else {
+    return false;
+  }
+  amount = static_cast<double>(atomic) / units;
+  return isfinite(amount) && amount >= 0;
+}
+
+bool parseZecBlock(const String& payload, const String& wallet, double& balance) {
+  JsonDocument document;
+  JsonDocument filter;
+  filter["data"]["address"] = true;
+  filter["data"]["balance"] = true;
+  filter["data"]["balanceZat"] = true;
+  filter["meta"]["network"] = true;
+  filter["meta"]["units"]["zatoshiPerZec"] = true;
+  if (deserializeJson(document, payload, DeserializationOption::Filter(filter)) ||
+      document["data"]["address"] != wallet || document["meta"]["network"] != "mainnet" ||
+      document["meta"]["units"]["zatoshiPerZec"] != "100000000") return false;
+  // Empty addresses omit the optional balanceZat alias; balance is still an
+  // exact zatoshi string, as established by the checked unit metadata above.
+  JsonVariantConst value = document["data"]["balanceZat"];
+  if (value.isNull()) value = document["data"]["balance"];
+  return parseAtomicAmount(value, 100000000.0, balance);
+}
+
+String addressPath(const String& address) {
+  static const char hex[] = "0123456789ABCDEF";
+  String encoded;
+  encoded.reserve(address.length() * 3);
+  for (size_t i = 0; i < address.length(); ++i) {
+    uint8_t c = static_cast<uint8_t>(address[i]);
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9')) encoded += static_cast<char>(c);
+    else { encoded += '%'; encoded += hex[c >> 4]; encoded += hex[c & 15]; }
+  }
+  return encoded;
+}
+
 bool parseHaskoin(const String& payload, double& balance) {
   JsonDocument document;
   if (deserializeJson(document, payload)) return false;
@@ -242,19 +375,6 @@ bool parseHaskoin(const String& payload, double& balance) {
                      document["unconfirmed"].as<int64_t>();
   balance = static_cast<double>(satoshis) / 100000000.0;
   return true;
-}
-
-bool parseZecBlock(const String& payload, double& balance) {
-  JsonDocument document;
-  if (deserializeJson(document, payload)) return false;
-  const char* balanceZat = document["data"]["balanceZat"];
-  if (!balanceZat || !balanceZat[0]) return false;
-
-  char* end = nullptr;
-  unsigned long long zatoshis = strtoull(balanceZat, &end, 10);
-  if (end == balanceZat || *end != '\0') return false;
-  balance = static_cast<double>(zatoshis) / 100000000.0;
-  return isfinite(balance) && balance >= 0.0;
 }
 
 bool sha256Bytes(const uint8_t* data, size_t length, uint8_t output[32]) {
@@ -326,14 +446,11 @@ uint64_t cashaddrPolymodStep(uint64_t checksum, uint8_t value) {
   return checksum;
 }
 
-bool decodeCashAddress(const String& address, const char* expectedPrefix,
-                       bool& scriptHash, uint8_t hash[20]) {
+bool decodeCashAddress(const String& address, bool& scriptHash,
+                       uint8_t hash[20], const char* expectedPrefix = "bitcoincash") {
   static constexpr char CHARSET[] =
       "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-  if (address.isEmpty() || address.length() > 130 || !expectedPrefix ||
-      !expectedPrefix[0]) {
-    return false;
-  }
+  if (address.isEmpty() || address.length() > 130) return false;
 
   bool hasLower = false;
   bool hasUpper = false;
@@ -404,18 +521,15 @@ bool decodeCashAddress(const String& address, const char* expectedPrefix,
 }
 
 bool addressToElectrumScriptHash(const String& address, uint8_t pubkeyVersion,
-                                 uint8_t scriptVersion,
-                                 const char* cashAddressPrefix,
-                                 String& scriptHashHex) {
+                                 uint8_t scriptVersion, bool allowCashAddress,
+                                 String& scriptHashHex, const char* cashPrefix = "bitcoincash") {
   uint8_t hash[20];
   bool isScriptHash = false;
-  if (cashAddressPrefix &&
+  if (allowCashAddress &&
       (address.indexOf(':') >= 0 || address.startsWith("q") ||
        address.startsWith("p") || address.startsWith("Q") ||
        address.startsWith("P"))) {
-    if (!decodeCashAddress(address, cashAddressPrefix, isScriptHash, hash)) {
-      return false;
-    }
+    if (!decodeCashAddress(address, isScriptHash, hash, cashPrefix)) return false;
   } else {
     uint8_t version = 0;
     if (!decodeBase58Address(address, version, hash)) return false;
@@ -458,8 +572,75 @@ bool addressToElectrumScriptHash(const String& address, uint8_t pubkeyVersion,
   return true;
 }
 
+bool garlicoinElectrumScriptHash(const String& address, String& scriptHashHex) {
+  String normalized = address;
+  normalized.toLowerCase();
+  if (!normalized.startsWith("grlc1")) {
+    return addressToElectrumScriptHash(address, 38, 50, false, scriptHashHex);
+  }
+  // Garlicoin supports Bech32 witness v0 (20- or 32-byte programs), not
+  // Bech32m/Taproot. Verify the checksum and padding before querying a server.
+  if (address.length() < 14 || address.length() > 90) return false;
+  bool lower = false, upper = false;
+  for (size_t i = 0; i < address.length(); ++i) {
+    lower |= address[i] >= 'a' && address[i] <= 'z';
+    upper |= address[i] >= 'A' && address[i] <= 'Z';
+  }
+  if (lower && upper) return false;
+  static constexpr char CHARSET[] = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+  static constexpr uint32_t GENERATORS[] = {
+      0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3};
+  uint32_t checksum = 1;
+  auto addChecksum = [&](uint8_t value) {
+    uint8_t top = checksum >> 25;
+    checksum = ((checksum & 0x1ffffffU) << 5) ^ value;
+    for (uint8_t i = 0; i < 5; ++i) {
+      if ((top >> i) & 1U) checksum ^= GENERATORS[i];
+    }
+  };
+  for (size_t i = 0; i < 4; ++i) addChecksum(normalized[i] >> 5);
+  addChecksum(0);
+  for (size_t i = 0; i < 4; ++i) addChecksum(normalized[i] & 31);
+  const size_t dataLength = normalized.length() - 5;
+  uint8_t data[85];
+  for (size_t i = 0; i < dataLength; ++i) {
+    const char* found = strchr(CHARSET, normalized[5 + i]);
+    if (!found) return false;
+    data[i] = static_cast<uint8_t>(found - CHARSET);
+    addChecksum(data[i]);
+  }
+  if (checksum != 1 || data[0] != 0) return false;
+  uint8_t script[34] = {};
+  size_t programLength = 0;
+  uint32_t accumulator = 0;
+  uint8_t bits = 0;
+  for (size_t i = 1; i < dataLength - 6; ++i) {
+    accumulator = ((accumulator << 5) | data[i]) & 0xfffU;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      if (programLength >= 32) return false;
+      script[2 + programLength++] = (accumulator >> bits) & 255U;
+    }
+  }
+  if (bits >= 5 || ((accumulator << (8 - bits)) & 255U) != 0 ||
+      (programLength != 20 && programLength != 32)) return false;
+  script[1] = programLength;
+  uint8_t digest[32];
+  if (!sha256Bytes(script, programLength + 2, digest)) return false;
+  static constexpr char HEX_DIGITS[] = "0123456789abcdef";
+  scriptHashHex = "";
+  if (!scriptHashHex.reserve(64)) return false;
+  for (int i = 31; i >= 0; --i) {
+    scriptHashHex += HEX_DIGITS[digest[i] >> 4];
+    scriptHashHex += HEX_DIGITS[digest[i] & 15];
+  }
+  return scriptHashHex.length() == 64;
+}
+
 bool queryElectrum(const ElectrumServer& server, const String& scriptHash,
-                   double baseUnitsPerCoin, double& balance, String& error) {
+                   double& balance, String& error, double units = 100000000.0) {
+  heliosMarkBalance(HeliosBalanceStage::Electrum);
   WiFiClient client;
   client.setTimeout(ELECTRUM_TIMEOUT_MS);
   if (!client.connect(server.host, server.port, ELECTRUM_TIMEOUT_MS)) {
@@ -474,15 +655,39 @@ bool queryElectrum(const ElectrumServer& server, const String& scriptHash,
       scriptHash + "\"]}\n");
 
   uint32_t startedAt = millis();
+  String line;
+  if (!line.reserve(256)) {
+    error = "LOW MEMORY";
+    client.stop();
+    return false;
+  }
   while (millis() - startedAt < ELECTRUM_TIMEOUT_MS) {
     if (!client.available()) {
       if (!client.connected()) break;
       vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
-    String line = client.readStringUntil('\n');
+    // Read incrementally so a missing newline cannot extend the overall
+    // timeout or grow a String without limit.
+    const int ch = client.read();
+    if (ch < 0 || ch == '\r') continue;
+    if (ch != '\n') {
+      if (line.length() >= MAX_ELECTRUM_LINE_BYTES) {
+        error = "RESPONSE TOO LARGE";
+        client.stop();
+        return false;
+      }
+      if (!line.concat(static_cast<char>(ch))) {
+        error = "LOW MEMORY";
+        client.stop();
+        return false;
+      }
+      continue;
+    }
     JsonDocument document;
-    if (deserializeJson(document, line) || document["id"] != 2) continue;
+    const bool wanted = !deserializeJson(document, line) && document["id"] == 2;
+    line = "";
+    if (!wanted) continue;
     JsonObject result = document["result"];
     if (result.isNull() || !result["confirmed"].is<int64_t>() ||
         !result["unconfirmed"].is<int64_t>()) {
@@ -492,7 +697,7 @@ bool queryElectrum(const ElectrumServer& server, const String& scriptHash,
     }
     int64_t satoshis = result["confirmed"].as<int64_t>() +
                        result["unconfirmed"].as<int64_t>();
-    balance = static_cast<double>(satoshis) / baseUnitsPerCoin;
+    balance = static_cast<double>(satoshis) / units;
     client.stop();
     return isfinite(balance) && balance >= 0;
   }
@@ -503,26 +708,18 @@ bool queryElectrum(const ElectrumServer& server, const String& scriptHash,
 
 template <size_t N>
 bool getElectrumBalance(const String& wallet, uint8_t pubkeyVersion,
-                        uint8_t scriptVersion,
-                        const char* cashAddressPrefix,
-                        double baseUnitsPerCoin,
+                        uint8_t scriptVersion, bool allowCashAddress,
                         const ElectrumServer (&servers)[N], double& balance,
-                        String& error) {
-  if (!isfinite(baseUnitsPerCoin) || baseUnitsPerCoin <= 0.0) {
-    error = "BALANCE CONFIG";
-    return false;
-  }
+                        String& error, double units = 100000000.0,
+                        const char* cashPrefix = "bitcoincash") {
   String scriptHash;
   if (!addressToElectrumScriptHash(wallet, pubkeyVersion, scriptVersion,
-                                   cashAddressPrefix, scriptHash)) {
+                                   allowCashAddress, scriptHash, cashPrefix)) {
     error = "INVALID ADDRESS";
     return false;
   }
   for (size_t i = 0; i < N; ++i) {
-    if (queryElectrum(servers[i], scriptHash, baseUnitsPerCoin, balance,
-                      error)) {
-      return true;
-    }
+    if (queryElectrum(servers[i], scriptHash, balance, error, units)) return true;
     if (i + 1 < N) vTaskDelay(pdMS_TO_TICKS(100));
   }
   return false;
@@ -531,6 +728,7 @@ bool getElectrumBalance(const String& wallet, uint8_t pubkeyVersion,
 }  // namespace
 
 void HeliosBalances::begin(HeliosSettings* settings) {
+  heliosNetworkMemoryBegin();
   settings_ = settings;
   mutex_ = xSemaphoreCreateMutex();
   if (!mutex_) return;
@@ -590,9 +788,11 @@ void HeliosBalances::syncWallets() {
       wallets_[i] = wallet;
       snapshots_[i] = HeliosBalanceSnapshot();
       snapshots_[i].pricesAvailable = previous.pricesAvailable;
+      snapshots_[i].priceStatus = previous.priceStatus;
       snapshots_[i].priceUsd = previous.priceUsd;
       snapshots_[i].priceCad = previous.priceCad;
       snapshots_[i].priceGbp = previous.priceGbp;
+      snapshots_[i].priceEur = previous.priceEur;
       snapshots_[i].pricesUpdatedAt = previous.pricesUpdatedAt;
       double storedBalance = 0.0;
       double pendingIncrease = 0.0;
@@ -635,6 +835,7 @@ void HeliosBalances::requestRefresh(HeliosCoin coin) {
   xSemaphoreTake(mutex_, portMAX_DELAY);
   size_t index = heliosCoinIndex(coin);
   pendingMask_ |= 1U << index;
+  priorityMask_ |= 1U << index;
   if (!wallets_[index].isEmpty() && !snapshots_[index].refreshing) {
     snapshots_[index].status = "QUEUED";
   }
@@ -677,6 +878,7 @@ double HeliosBalances::fiatTotal(uint8_t currency, bool& available) const {
     const HeliosBalanceSnapshot& snapshot = snapshots_[i];
     if (!snapshot.available || !snapshot.pricesAvailable) continue;
     double price = currency == 1 ? snapshot.priceCad
+                                 : currency == 3 ? snapshot.priceEur
                                  : currency == 2 ? snapshot.priceGbp
                                                  : snapshot.priceUsd;
     if (!isfinite(snapshot.balance) || !isfinite(price)) continue;
@@ -714,7 +916,9 @@ void HeliosBalances::processAcknowledgements() {
 
 void HeliosBalances::taskLoop() {
   uint32_t wifiReadyAt = 0;
+  size_t nextRefreshPosition = 0;
   for (;;) {
+    heliosMarkBalance(HeliosBalanceStage::Waiting);
     processAcknowledgements();
     if (!fetchState().enabled) {
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
@@ -739,13 +943,43 @@ void HeliosBalances::taskLoop() {
     }
 
     int next = -1;
+    bool pricesOnly = false;
     String wallet;
     xSemaphoreTake(mutex_, portMAX_DELAY);
-    for (size_t i = 0; fetchEnabled_ && i < HELIOS_COIN_COUNT; ++i) {
-      if (pendingMask_ & (1U << i)) {
-        pendingMask_ &= ~(1U << i);
-        next = static_cast<int>(i);
-        wallet = wallets_[i];
+    // Prioritize an explicitly saved wallet, then rotate in display order.
+    // Refilling the five-minute mask must not restart selection at index 0
+    // and starve coins near the end when a sweep takes longer than five minutes.
+    for (uint8_t pass = 0; fetchEnabled_ && pass < 2 && next < 0; ++pass) {
+      const uint16_t candidates = pass == 0
+          ? pendingMask_ & priorityMask_ : pendingMask_;
+      for (size_t offset = 0; offset < HELIOS_COIN_COUNT; ++offset) {
+        const size_t position = (nextRefreshPosition + offset) % HELIOS_COIN_COUNT;
+        const size_t index = heliosCoinIndex(heliosDisplayCoinProfileAt(position).id);
+        if ((candidates & (1U << index)) == 0) continue;
+        pendingMask_ &= ~(1U << index);
+        priorityMask_ &= ~(1U << index);
+        next = static_cast<int>(index);
+        wallet = wallets_[index];
+        nextRefreshPosition = (position + 1) % HELIOS_COIN_COUNT;
+        break;
+      }
+    }
+    // Recover missing/expired prices between normal wallet sweeps. Keep the
+    // same fair display-order cursor, one coin at a time, with a minute of
+    // backoff per coin. Do not fetch wallet balances again just to retry prices.
+    if (fetchEnabled_ && next < 0) {
+      for (size_t offset = 0; offset < HELIOS_COIN_COUNT; ++offset) {
+        const size_t position = (nextRefreshPosition + offset) % HELIOS_COIN_COUNT;
+        const size_t index = heliosCoinIndex(heliosDisplayCoinProfileAt(position).id);
+        const auto& snapshot = snapshots_[index];
+        if (wallets_[index].isEmpty() ||
+            (snapshot.pricesAvailable &&
+             millis() - snapshot.pricesUpdatedAt < PRICE_CACHE_MS) ||
+            millis() - lastPriceAttemptAt_[index] < PRICE_RETRY_MS) continue;
+        next = static_cast<int>(index);
+        wallet = wallets_[index];
+        pricesOnly = true;
+        nextRefreshPosition = (position + 1) % HELIOS_COIN_COUNT;
         break;
       }
     }
@@ -760,33 +994,43 @@ void HeliosBalances::taskLoop() {
       continue;
     }
 
-    refreshCoin(static_cast<HeliosCoin>(next), wallet);
+    {
+      // Do not hold the snapshot mutex while waiting: web/display readers
+      // need it. Release the memory gate before the between-coin delay.
+      HeliosNetworkMemoryGuard memory(portMAX_DELAY, true);
+      if (memory) refreshCoin(static_cast<HeliosCoin>(next), wallet, pricesOnly);
+    }
     xSemaphoreTake(mutex_, portMAX_DELAY);
     fetchActive_ = false;
     fetchStateSinceMs_ = millis();
     xSemaphoreGive(mutex_);
-    vTaskDelay(pdMS_TO_TICKS(BETWEEN_COIN_REQUESTS_MS));
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(BETWEEN_COIN_REQUESTS_MS));
   }
 }
 
-void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet) {
+void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet,
+                                  bool pricesOnly) {
   size_t index = heliosCoinIndex(coin);
+  heliosMarkBalanceCoin(static_cast<uint32_t>(index));
   xSemaphoreTake(mutex_, portMAX_DELAY);
   snapshots_[index].refreshing = true;
-  snapshots_[index].status = wallet.isEmpty() ? "NOT SET" : "UPDATING";
+  if (!pricesOnly)
+    snapshots_[index].status = wallet.isEmpty() ? "NOT SET" : "UPDATING";
   xSemaphoreGive(mutex_);
 
   double balance = 0;
   double usd = 0;
   double cad = 0;
   double gbp = 0;
+  double eur = 0;
   String balanceError;
   String priceError;
-  bool balanceOk = !wallet.isEmpty() &&
+  bool balanceOk = !pricesOnly && !wallet.isEmpty() &&
                    fetchBalance(coin, wallet, balance, balanceError);
   bool persistBalance = false;
   double pendingIncrease = 0.0;
   xSemaphoreTake(mutex_, portMAX_DELAY);
+  bool priceFetched = false;
   bool pricesOk = snapshots_[index].pricesAvailable &&
                   millis() - snapshots_[index].pricesUpdatedAt <
                       PRICE_CACHE_MS;
@@ -794,10 +1038,13 @@ void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet) {
     usd = snapshots_[index].priceUsd;
     cad = snapshots_[index].priceCad;
     gbp = snapshots_[index].priceGbp;
+    eur = snapshots_[index].priceEur;
   }
   xSemaphoreGive(mutex_);
   if (!wallet.isEmpty() && !pricesOk) {
-    pricesOk = fetchPrices(coin, usd, cad, gbp, priceError);
+    lastPriceAttemptAt_[index] = millis();
+    pricesOk = fetchPrices(coin, usd, cad, gbp, eur, priceError);
+    priceFetched = pricesOk;
   }
   xSemaphoreTake(mutex_, portMAX_DELAY);
   if (wallets_[index] != wallet) {
@@ -828,11 +1075,11 @@ void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet) {
     if (snapshots_[index].increaseSequence != 0) {
       pendingIncrease = snapshots_[index].increaseAmount;
     }
-  } else if (wallet.isEmpty()) {
+  } else if (!pricesOnly && wallet.isEmpty()) {
     snapshots_[index].available = false;
     snapshots_[index].balance = 0;
     snapshots_[index].status = "NOT SET";
-  } else {
+  } else if (!pricesOnly) {
     snapshots_[index].available = snapshots_[index].baselineReady;
     String reason = balanceError.isEmpty() ? "UNAVAILABLE" : balanceError;
     snapshots_[index].status = snapshots_[index].available
@@ -844,7 +1091,15 @@ void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet) {
     snapshots_[index].priceUsd = usd;
     snapshots_[index].priceCad = cad;
     snapshots_[index].priceGbp = gbp;
-    snapshots_[index].pricesUpdatedAt = millis();
+    snapshots_[index].priceEur = eur;
+    if (priceFetched) snapshots_[index].pricesUpdatedAt = millis();
+    snapshots_[index].priceStatus = "UPDATED";
+  } else if (wallet.isEmpty()) {
+    snapshots_[index].priceStatus = "NOT SET";
+  } else {
+    const String reason = priceError.isEmpty() ? "UNAVAILABLE" : priceError;
+    snapshots_[index].priceStatus = snapshots_[index].pricesAvailable
+        ? String("CACHED (") + reason + ")" : reason;
   }
   xSemaphoreGive(mutex_);
   if (balanceOk && persistBalance) {
@@ -854,6 +1109,46 @@ void HeliosBalances::refreshCoin(HeliosCoin coin, const String& wallet) {
 
 bool HeliosBalances::fetchBalance(HeliosCoin coin, const String& wallet,
                                   double& balance, String& error) {
+  if (coin == HeliosCoin::GRLC) {
+    String explorerError;
+    {
+      StreamString payload;
+      const String url = "https://explorer.grlc.eu/addr.php?a=" +
+                         addressPath(wallet) + "&api=1&op=balance";
+      if (getPayload(url, true, payload, explorerError) &&
+          parseGarlicoin(payload, balance)) return true;
+      if (explorerError.isEmpty()) explorerError = "GRLC RESPONSE";
+    }
+    // Keep the working explorer first. If HTTPS fails, use the lightweight
+    // community servers; release its payload before opening another socket.
+    String scriptHash;
+    if (!garlicoinElectrumScriptHash(wallet, scriptHash)) {
+      error = "INVALID ADDRESS";
+      return false;
+    }
+    for (const ElectrumServer& server : GRLC_ELECTRUM_SERVERS) {
+      if (queryElectrum(server, scriptHash, balance, error)) return true;
+      vTaskDelay(1);
+    }
+    error = explorerError;
+    return false;
+  }
+  if (coin == HeliosCoin::XEC) {
+    return getElectrumBalance(wallet, 0, 5, true, XEC_ELECTRUM_SERVERS,
+                              balance, error, 100.0, "ecash");
+  }
+  if (coin == HeliosCoin::ZEC) {
+    if (!(wallet.startsWith("t1") || wallet.startsWith("t3"))) {
+      error = "USE TRANSPARENT ADDRESS";
+      return false;
+    }
+    StreamString payload;
+    String url = "https://api.zecblock.com/v1/addresses/" + addressPath(wallet) + "?limit=1";
+    if (!getPayload(url, true, payload, error)) return false;
+    if (parseZecBlock(payload, wallet, balance)) return true;
+    error = "ZEC RESPONSE";
+    return false;
+  }
   if (coin == HeliosCoin::WJK) {
     StreamString payload;
     String primaryError;
@@ -880,7 +1175,7 @@ bool HeliosBalances::fetchBalance(HeliosCoin coin, const String& wallet,
   String fallbackError;
   switch (coin) {
     case HeliosCoin::CHTA:
-      return getElectrumBalance(wallet, 28, 5, nullptr, 100000000.0,
+      return getElectrumBalance(wallet, 28, 5, false,
                                 CHTA_ELECTRUM_SERVERS, balance, error);
 
     case HeliosCoin::WJK:
@@ -909,25 +1204,8 @@ bool HeliosBalances::fetchBalance(HeliosCoin coin, const String& wallet,
           parseHaskoin(payload, balance)) {
         return true;
       }
-      if (getElectrumBalance(wallet, 0, 5, "bitcoincash", 100000000.0,
-                             BCH_ELECTRUM_SERVERS, balance, fallbackError)) {
-        return true;
-      }
-      break;
-
-    case HeliosCoin::XEC:
-      return getElectrumBalance(wallet, 0, 5, "ecash", 100.0,
-                                XEC_ELECTRUM_SERVERS, balance, error);
-
-    case HeliosCoin::ZEC:
-      if (!wallet.startsWith("t1") && !wallet.startsWith("t3")) {
-        error = "T-ADDRESS ONLY";
-        return false;
-      }
-      if (getPayload("https://api.zecblock.com/v1/addresses/" + wallet +
-                         "?limit=1",
-                     true, payload, primaryError) &&
-          parseZecBlock(payload, balance)) {
+      if (getElectrumBalance(wallet, 0, 5, true, BCH_ELECTRUM_SERVERS,
+                             balance, fallbackError)) {
         return true;
       }
       break;
@@ -965,27 +1243,130 @@ bool HeliosBalances::fetchBalance(HeliosCoin coin, const String& wallet,
 }
 
 bool HeliosBalances::fetchPrices(HeliosCoin coin, double& usd, double& cad,
-                                 double& gbp, String& error) {
-  String url = "https://api.coinpaprika.com/v1/tickers/" +
-               String(PRICE_IDS[heliosCoinIndex(coin)]) +
-               "?quotes=USD,CAD,GBP";
-  StreamString payload;
-  if (!getPayload(url, true, payload, error)) return false;
-  JsonDocument document;
-  if (deserializeJson(document, static_cast<const String&>(payload))) {
-    error = "PRICE RESPONSE";
+                                 double& gbp, double& eur, String& error) {
+  // Parse only the four prices. Full ticker metadata is unnecessary on a CYD.
+  // Assign outputs only after the complete quote set passes validation.
+  auto fetchQuotes = [&](const String& url, const char* geckoId,
+                         String& reason) -> bool {
+    StreamString payload;
+    if (!getPayload(url, true, payload, reason)) return false;
+    JsonDocument filter;
+    if (geckoId) {
+      for (const char* currency : {"usd", "cad", "gbp", "eur"})
+        filter[geckoId][currency] = true;
+    } else {
+      for (const char* currency : {"USD", "CAD", "GBP", "EUR"})
+        filter["quotes"][currency]["price"] = true;
+    }
+    JsonDocument document;
+    if (deserializeJson(document, static_cast<const String&>(payload),
+                        DeserializationOption::Filter(filter))) {
+      reason = "PRICE RESPONSE";
+      return false;
+    }
+    // ArduinoJson member proxies at different nesting depths have distinct
+    // types. Assign to JsonVariant explicitly instead of mixing them in ?:.
+    JsonVariant values[4];
+    if (geckoId) {
+      JsonObject quotes = document[geckoId];
+      values[0] = quotes["usd"].as<JsonVariant>();
+      values[1] = quotes["cad"].as<JsonVariant>();
+      values[2] = quotes["gbp"].as<JsonVariant>();
+      values[3] = quotes["eur"].as<JsonVariant>();
+    } else {
+      JsonObject quotes = document["quotes"];
+      values[0] = quotes["USD"]["price"].as<JsonVariant>();
+      values[1] = quotes["CAD"]["price"].as<JsonVariant>();
+      values[2] = quotes["GBP"]["price"].as<JsonVariant>();
+      values[3] = quotes["EUR"]["price"].as<JsonVariant>();
+    }
+    double prices[4];
+    for (size_t i = 0; i < 4; ++i) {
+      if (!values[i].is<double>()) {
+        reason = "PRICE MISSING";
+        return false;
+      }
+      prices[i] = values[i].as<double>();
+      if (!isfinite(prices[i]) || prices[i] <= 0) {
+        reason = "PRICE INVALID";
+        return false;
+      }
+    }
+    usd = prices[0]; cad = prices[1]; gbp = prices[2]; eur = prices[3];
+    return true;
+  };
+
+  const char* geckoId = nullptr;
+  switch (coin) {
+    case HeliosCoin::GRLC: geckoId = "garlicoin"; break;
+    case HeliosCoin::DGB: geckoId = "digibyte"; break;
+    case HeliosCoin::BCH: geckoId = "bitcoin-cash"; break;
+    case HeliosCoin::ZEC: geckoId = "zcash"; break;
+    default: break;
+  }
+  String primaryError;
+  // GRLC is inactive on Coinpaprika; use its verified CoinGecko ID directly.
+  if (coin != HeliosCoin::GRLC &&
+      fetchQuotes("https://api.coinpaprika.com/v1/tickers/" +
+                      String(PRICE_IDS[heliosCoinIndex(coin)]) +
+                      "?quotes=USD,CAD,GBP,EUR",
+                  nullptr, primaryError)) return true;
+  if (geckoId) {
+    if (fetchQuotes("https://api.coingecko.com/api/v3/simple/price?ids=" +
+                        String(geckoId) + "&vs_currencies=usd,cad,gbp,eur",
+                    geckoId, error)) return true;
+    if (!primaryError.isEmpty()) error = primaryError + "; " + error;
     return false;
   }
-  JsonObject quotes = document["quotes"];
-  if (!quotes["USD"]["price"].is<double>() ||
-      !quotes["CAD"]["price"].is<double>() ||
-      !quotes["GBP"]["price"].is<double>()) {
-    error = "PRICE MISSING";
+  if (coin == HeliosCoin::WJK) {
+    // WJK is a native chain, not CoinGecko's unrelated WOJAK token. Its
+    // compact converter supplies USD; reuse recent fiat ratios from any
+    // successfully fetched quote set instead of issuing three extra calls.
+    double cadRatio = 0, gbpRatio = 0, eurRatio = 0;
+    xSemaphoreTake(mutex_, portMAX_DELAY);
+    for (const auto& snapshot : snapshots_) {
+      if (!snapshot.pricesAvailable || snapshot.priceUsd <= 0 ||
+          millis() - snapshot.pricesUpdatedAt >= PRICE_CACHE_MS) continue;
+      cadRatio = snapshot.priceCad / snapshot.priceUsd;
+      gbpRatio = snapshot.priceGbp / snapshot.priceUsd;
+      eurRatio = snapshot.priceEur / snapshot.priceUsd;
+      break;
+    }
+    xSemaphoreGive(mutex_);
+    if (isfinite(cadRatio) && isfinite(gbpRatio) && isfinite(eurRatio) &&
+        cadRatio > 0 && gbpRatio > 0 && eurRatio > 0) {
+      StreamString payload;
+      if (getPayload("https://api.coinpaprika.com/v1/price-converter?base_currency_id=wjk-wojakcoin&quote_currency_id=usd-us-dollars&amount=1",
+                     true, payload, error)) {
+        JsonDocument filter;
+        filter["price"] = true;
+        filter["base_currency_id"] = true;
+        filter["quote_currency_id"] = true;
+        JsonDocument document;
+        if (!deserializeJson(document, static_cast<const String&>(payload),
+                             DeserializationOption::Filter(filter)) &&
+            document["base_currency_id"] == "wjk-wojakcoin" &&
+            document["quote_currency_id"] == "usd-us-dollars" &&
+            document["price"].is<double>()) {
+          const double nextUsd = document["price"].as<double>();
+          const double nextCad = nextUsd * cadRatio;
+          const double nextGbp = nextUsd * gbpRatio;
+          const double nextEur = nextUsd * eurRatio;
+          if (isfinite(nextUsd) && isfinite(nextCad) && isfinite(nextGbp) &&
+              isfinite(nextEur) && nextUsd > 0 && nextCad > 0 &&
+              nextGbp > 0 && nextEur > 0) {
+            usd = nextUsd; cad = nextCad; gbp = nextGbp; eur = nextEur;
+            return true;
+          }
+        }
+        error = "WJK PRICE RESPONSE";
+      }
+    } else {
+      error = "WAITING FOR FX";
+    }
+    error = primaryError + "; " + error;
     return false;
   }
-  usd = quotes["USD"]["price"].as<double>();
-  cad = quotes["CAD"]["price"].as<double>();
-  gbp = quotes["GBP"]["price"].as<double>();
-  return isfinite(usd) && isfinite(cad) && isfinite(gbp) && usd >= 0 &&
-         cad >= 0 && gbp >= 0;
+  error = primaryError;
+  return false;
 }

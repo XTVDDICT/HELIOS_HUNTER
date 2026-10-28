@@ -34,6 +34,8 @@ class HeliosDisplay {
   void wakeScreen();
   void drawFooter(uint16_t accent);
   void handleTouch();
+  bool pageVisible(uint8_t page) const;
+  uint8_t nextVisiblePage(bool forward) const;
   String rateText(float kh) const;
   String balanceText(const HeliosCoinProfile& profile) const;
   String fiatText(double value) const;

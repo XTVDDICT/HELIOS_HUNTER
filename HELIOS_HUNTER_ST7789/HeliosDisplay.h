@@ -34,6 +34,8 @@ class HeliosDisplay {
   void wakeScreen();
   void drawFooter(uint16_t accent);
   void handleTouch();
+  bool pageVisible(uint8_t page) const;
+  uint8_t nextVisiblePage(bool forward) const;
   String rateText(float kh) const;
   String balanceText(const HeliosCoinProfile& profile) const;
   String fiatText(double value) const;
@@ -42,7 +44,6 @@ class HeliosDisplay {
   HeliosBalances* balances_ = nullptr;
   uint8_t page_ = 0;
   uint32_t lastDrawAt_ = 0;
-  uint32_t lastTouchPollAt_ = 0;
   uint8_t appliedBrightness_ = 0;
   uint16_t appliedSleepSeconds_ = 0;
   bool appliedFlipped_ = false;
@@ -61,6 +62,7 @@ class HeliosDisplay {
   int32_t touchLastX_ = 0;
   int32_t touchLastY_ = 0;
   uint32_t lastInteractionAt_ = 0;
+  uint32_t lastTouchPollAt_ = 0;
   uint32_t lastSleepingTouchPollAt_ = 0;
   uint32_t lastBalanceCheckAt_ = 0;
 };

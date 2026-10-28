@@ -1,5 +1,6 @@
 #include "SoloHunterMiner.h"
 #include "SoloHunterSha256.h"
+#include "HeliosNetworkMemory.h"
 
 #include <ArduinoJson.h>
 #include <Client.h>
@@ -9,6 +10,11 @@
 #include <math.h>
 #include <mbedtls/sha256.h>
 #include <new>
+#include <atomic>
+
+extern "C" bool nerd_sha256d_prefilter(const uint32_t* midstate,
+                                        const uint8_t* headerTail,
+                                        const uint32_t* bake);
 
 namespace {
 
@@ -16,10 +22,16 @@ constexpr size_t MAX_MERKLE_BRANCHES = 32;
 constexpr size_t MAX_STRATUM_LINE = 12288;
 constexpr uint32_t HASH_BATCH_SIZE = 256;
 constexpr uint32_t AUXILIARY_HASH_BATCH_SIZE = 1024;
-constexpr uint8_t AUXILIARY_BATCHES_BEFORE_DELAY = 16;
+constexpr UBaseType_t AUXILIARY_TASK_PRIORITY = tskIDLE_PRIORITY + 1;
+// Retain two real idle ticks; give the helper a longer bounded work slice.
+// Display/TLS pause checks still run every 32 nonces, independent of this cap.
+constexpr uint32_t AUXILIARY_RUN_BUDGET_US = 20000;
+constexpr TickType_t AUXILIARY_IDLE_TICKS = 2;
+constexpr uint32_t AUXILIARY_SCHEDULE_CHECK_MASK = 31;
 constexpr uint32_t HARDWARE_HASH_BATCH_SIZE = 65536;
 constexpr uint8_t HARDWARE_BATCHES_BEFORE_DELAY = 16;
-// Run the software helper below all UI/network work and block it every batch.
+// Give the helper short priority-1 bursts, then block it for two real ticks.
+// Idle/UI work must get time even when every assembly result is a non-candidate.
 // Its nonce range is disjoint from the hardware engine, so these are real
 // additional attempts rather than duplicated hashrate.
 constexpr bool ENABLE_AUXILIARY_MINING = true;
@@ -114,6 +126,7 @@ struct AuxiliaryMiningWork {
   uint32_t nextNonceSwapped = 0;
   uint32_t midstate[8] = {0};
   uint8_t headerTail[16] = {0};
+  uint32_t bake[15] = {0};
   uint8_t shareTarget[32] = {0};
   uint8_t blockTarget[32] = {0};
 };
@@ -123,6 +136,7 @@ struct AuxiliaryMiningBatch {
   uint32_t firstNonceSwapped = 0;
   uint32_t midstate[8] = {0};
   uint8_t headerTail[16] = {0};
+  uint32_t bake[15] = {0};
   uint8_t shareTarget[32] = {0};
   uint8_t blockTarget[32] = {0};
 };
@@ -140,6 +154,14 @@ QueueHandle_t auxiliaryCandidateQueue = nullptr;
 portMUX_TYPE auxiliaryWorkMux = portMUX_INITIALIZER_UNLOCKED;
 AuxiliaryMiningWork auxiliaryWork;
 uint32_t auxiliaryHashesPending = 0;
+std::atomic<bool> auxiliaryEnabled{true};
+std::atomic<uint32_t> auxiliaryRunBudgetUs{AUXILIARY_RUN_BUDGET_US};
+std::atomic<uint32_t> helperControlEpoch{0};
+SoloHunterMiningProfile activeProfile;
+std::atomic<const char*> auxiliaryMode{"WAITING"};
+std::atomic<uint32_t> auxiliarySliceYields{0};
+std::atomic<uint32_t> auxiliaryBalanceWaits{0};
+std::atomic<uint32_t> auxiliaryPartialBatches{0};
 SoloHunterMiningConfig activeConfig;
 SoloHunterMiningStats activeStats;
 volatile uint32_t configRevision = 0;
@@ -397,6 +419,64 @@ __attribute__((always_inline)) inline uint32_t rotateRight32(uint32_t value) {
 #endif
 }
 
+void prepareAuxiliaryBake(const uint32_t midstate[8],
+                          const uint8_t headerTail[16],
+                          uint32_t bake[15]) {
+  const auto smallSigma0 = [](uint32_t value) {
+    return rotateRight32<7>(value) ^ rotateRight32<18>(value) ^
+           (value >> 3);
+  };
+  const auto smallSigma1 = [](uint32_t value) {
+    return rotateRight32<17>(value) ^ rotateRight32<19>(value) ^
+           (value >> 10);
+  };
+  const auto bigSigma0 = [](uint32_t value) {
+    return rotateRight32<2>(value) ^ rotateRight32<13>(value) ^
+           rotateRight32<22>(value);
+  };
+  const auto bigSigma1 = [](uint32_t value) {
+    return rotateRight32<6>(value) ^ rotateRight32<11>(value) ^
+           rotateRight32<25>(value);
+  };
+  const auto choose = [](uint32_t x, uint32_t y, uint32_t z) {
+    return z ^ (x & (y ^ z));
+  };
+  const auto majority = [](uint32_t x, uint32_t y, uint32_t z) {
+    return (x & y) | (z & (x | y));
+  };
+
+  bake[0] = loadBigEndian32(headerTail);
+  bake[1] = loadBigEndian32(headerTail + 4);
+  bake[2] = loadBigEndian32(headerTail + 8);
+  bake[3] = smallSigma0(bake[1]) + bake[0];
+  bake[4] = smallSigma1(640U) + smallSigma0(bake[2]) + bake[1];
+  memcpy(bake + 5, midstate, 8 * sizeof(uint32_t));
+
+  auto round = [&](uint32_t& a, uint32_t b, uint32_t c, uint32_t& d,
+                   uint32_t e, uint32_t f, uint32_t g, uint32_t& h,
+                   uint32_t word, uint32_t constant) {
+    const uint32_t temp1 =
+        h + bigSigma1(e) + choose(e, f, g) + constant + word;
+    const uint32_t temp2 = bigSigma0(a) + majority(a, b, c);
+    d += temp1;
+    h = temp1 + temp2;
+  };
+
+  uint32_t* state = bake + 5;
+  round(state[0], state[1], state[2], state[3], state[4], state[5],
+        state[6], state[7], bake[0], SHA256_ROUND_CONSTANTS[0]);
+  round(state[7], state[0], state[1], state[2], state[3], state[4],
+        state[5], state[6], bake[1], SHA256_ROUND_CONSTANTS[1]);
+  round(state[6], state[7], state[0], state[1], state[2], state[3],
+        state[4], state[5], bake[2], SHA256_ROUND_CONSTANTS[2]);
+
+  bake[13] = state[4] + bigSigma1(state[1]) +
+             choose(state[1], state[2], state[3]) +
+             SHA256_ROUND_CONSTANTS[3];
+  bake[14] = bigSigma0(state[5]) +
+             majority(state[5], state[6], state[7]);
+}
+
 void sha256Initialize(uint32_t state[8]) {
   memcpy(state, SHA256_INITIAL_STATE, sizeof(SHA256_INITIAL_STATE));
 }
@@ -620,7 +700,36 @@ bool miningMathSelfTest() {
   sha256d80(header, optimizedHash, schedule);
   if (memcmp(optimizedHash, expected, sizeof(optimizedHash)) != 0) return false;
   targetFromDifficulty(1.0, difficultyOneTarget);
-  return hashMeetsTarget(optimizedHash, difficultyOneTarget);
+  if (!hashMeetsTarget(optimizedHash, difficultyOneTarget)) return false;
+
+  // Check both the true genesis candidate and nearby non-candidates so a
+  // prefilter/bake integration error cannot silently discard helper work.
+  uint32_t helperMidstate[8];
+  uint32_t helperBake[15];
+  sha256Initialize(helperMidstate);
+  sha256CompressBlock(helperMidstate, header, schedule);
+  prepareAuxiliaryBake(helperMidstate, header + 64, helperBake);
+  const uint32_t baseNonce =
+      static_cast<uint32_t>(header[76]) |
+      (static_cast<uint32_t>(header[77]) << 8) |
+      (static_cast<uint32_t>(header[78]) << 16) |
+      (static_cast<uint32_t>(header[79]) << 24);
+  for (uint32_t offset = 0; offset < 8; ++offset) {
+    const uint32_t nonce = baseNonce + offset;
+    header[76] = static_cast<uint8_t>(nonce);
+    header[77] = static_cast<uint8_t>(nonce >> 8);
+    header[78] = static_cast<uint8_t>(nonce >> 16);
+    header[79] = static_cast<uint8_t>(nonce >> 24);
+    sha256d80FromMidstate(helperMidstate, header + 64, optimizedHash,
+                          schedule);
+    const bool expectedCandidate =
+        optimizedHash[30] == 0 && optimizedHash[31] == 0;
+    if (nerd_sha256d_prefilter(helperMidstate, header + 64, helperBake) !=
+        expectedCandidate) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool prepareMidstate(MiningSession& session) {
@@ -668,6 +777,8 @@ void clearAuxiliaryWork() {
 }
 
 uint32_t publishAuxiliaryWork(const MiningSession& session) {
+  uint32_t bake[15];
+  prepareAuxiliaryBake(session.midstate, session.job.header + 64, bake);
   portENTER_CRITICAL(&auxiliaryWorkMux);
   if (++auxiliaryWork.generation == 0) ++auxiliaryWork.generation;
   auxiliaryWork.nextNonceSwapped =
@@ -676,6 +787,7 @@ uint32_t publishAuxiliaryWork(const MiningSession& session) {
          sizeof(auxiliaryWork.midstate));
   memcpy(auxiliaryWork.headerTail, session.job.header + 64,
          sizeof(auxiliaryWork.headerTail));
+  memcpy(auxiliaryWork.bake, bake, sizeof(auxiliaryWork.bake));
   memcpy(auxiliaryWork.shareTarget, session.shareTarget,
          sizeof(auxiliaryWork.shareTarget));
   memcpy(auxiliaryWork.blockTarget, session.blockTarget,
@@ -708,6 +820,7 @@ bool reserveAuxiliaryBatch(AuxiliaryMiningBatch& batch) {
     memcpy(batch.midstate, auxiliaryWork.midstate, sizeof(batch.midstate));
     memcpy(batch.headerTail, auxiliaryWork.headerTail,
            sizeof(batch.headerTail));
+    memcpy(batch.bake, auxiliaryWork.bake, sizeof(batch.bake));
     memcpy(batch.shareTarget, auxiliaryWork.shareTarget,
            sizeof(batch.shareTarget));
     memcpy(batch.blockTarget, auxiliaryWork.blockTarget,
@@ -736,12 +849,34 @@ void auxiliaryMiningTask(void*) {
   uint32_t headerTailWords[4];
   uint32_t hashWords[8];
   uint8_t hash[32];
-  uint8_t batchesBeforeDelay = 0;
+  uint32_t sliceStartedAtUs = micros();
 
   for (;;) {
+    if (!auxiliaryEnabled.load(std::memory_order_relaxed)) {
+      auxiliaryMode.store("DISABLED", std::memory_order_relaxed);
+      vTaskDelay(pdMS_TO_TICKS(20));
+      sliceStartedAtUs = micros();
+      continue;
+    }
+    if (heliosDisplayBusy()) {
+      auxiliaryMode.store("DISPLAY_PAUSED", std::memory_order_relaxed);
+      vTaskDelay(AUXILIARY_IDLE_TICKS);
+      sliceStartedAtUs = micros();
+      continue;
+    }
+    // Core-1 hardware mining continues while this helper leaves TLS alone.
+    if (heliosBalanceNetworkBusy()) {
+      auxiliaryMode.store("BALANCE_PAUSED", std::memory_order_relaxed);
+      auxiliaryBalanceWaits.fetch_add(1, std::memory_order_relaxed);
+      vTaskDelay(pdMS_TO_TICKS(20));
+      sliceStartedAtUs = micros();
+      continue;
+    }
     AuxiliaryMiningBatch batch;
     if (!reserveAuxiliaryBatch(batch)) {
+      auxiliaryMode.store("WAITING", std::memory_order_relaxed);
       vTaskDelay(pdMS_TO_TICKS(20));
+      sliceStartedAtUs = micros();
       continue;
     }
 
@@ -751,10 +886,38 @@ void auxiliaryMiningTask(void*) {
     const uint16_t candidateMask =
         hardwareLeadingZeroMask(batch.shareTarget) &
         hardwareLeadingZeroMask(batch.blockTarget);
+    const bool useAssemblyPrefilter = candidateMask == 0xFFFFU;
+    auxiliaryMode.store(useAssemblyPrefilter ? "ASM_16BIT" : "C_VARIABLE_MASK",
+                        std::memory_order_relaxed);
     uint32_t nonceSwapped = batch.firstNonceSwapped;
+    uint32_t completedHashes = 0;
     for (uint32_t i = 0; i < AUXILIARY_HASH_BATCH_SIZE; ++i) {
+      // Check before hashing so the assembly early-exit path cannot skip
+      // scheduling. The 32-nonce granularity slightly extends the 20 ms budget.
+      if ((i & AUXILIARY_SCHEDULE_CHECK_MASK) == 0) {
+        if (!auxiliaryEnabled.load(std::memory_order_relaxed) ||
+            heliosBalanceNetworkBusy() || heliosDisplayBusy()) break;
+        if (static_cast<uint32_t>(micros() - sliceStartedAtUs) >=
+            auxiliaryRunBudgetUs.load(std::memory_order_relaxed)) {
+          auxiliarySliceYields.fetch_add(1, std::memory_order_relaxed);
+          vTaskDelay(AUXILIARY_IDLE_TICKS);
+          sliceStartedAtUs = micros();
+          // A balance request may start during that pause. Discard the rest
+          // of this reserved batch and do not count it as completed work.
+          if (!auxiliaryEnabled.load(std::memory_order_relaxed) ||
+            heliosBalanceNetworkBusy() || heliosDisplayBusy()) break;
+        }
+      }
       const uint32_t thisNonceSwapped = nonceSwapped++;
+      ++completedHashes;
       headerTailWords[3] = thisNonceSwapped;
+      if (useAssemblyPrefilter) {
+        storeBigEndian32(batch.headerTail + 12, thisNonceSwapped);
+        if (!nerd_sha256d_prefilter(batch.midstate, batch.headerTail,
+                                    batch.bake)) {
+          continue;
+        }
+      }
       sha256d80WordsFromMidstate(batch.midstate, headerTailWords, hashWords,
                                  schedule);
 
@@ -775,14 +938,10 @@ void auxiliaryMiningTask(void*) {
         xQueueSend(auxiliaryCandidateQueue, &candidate, 0);
       }
     }
-    recordAuxiliaryHashes(AUXILIARY_HASH_BATCH_SIZE);
-    if (++batchesBeforeDelay >= AUXILIARY_BATCHES_BEFORE_DELAY) {
-      batchesBeforeDelay = 0;
-      vTaskDelay(pdMS_TO_TICKS(1));
-    } else {
-      // The core-0 idle task has the same priority and gets watchdog time here.
-      taskYIELD();
+    if (completedHashes != AUXILIARY_HASH_BATCH_SIZE) {
+      auxiliaryPartialBatches.fetch_add(1, std::memory_order_relaxed);
     }
+    recordAuxiliaryHashes(completedHashes);
   }
 }
 
@@ -842,9 +1001,56 @@ bool buildJobHeader(MiningSession& session) {
   return job.valid;
 }
 
-bool sendDocument(Client& client, JsonDocument& document) {
-  if (serializeJson(document, client) == 0) return false;
-  return client.print('\n') == 1;
+// ArduinoJson writes punctuation and string characters separately. Buffer
+// the wire representation, including its newline, to avoid a socket operation
+// for each fragment. Fixed stack storage; long messages stream in chunks.
+class StratumMessageWriter {
+ public:
+  StratumMessageWriter(Client& client, SoloHunterMiningProfile* profile)
+      : client_(client), profile_(profile) {}
+  size_t write(uint8_t value) { return write(&value, 1); }
+  size_t write(const uint8_t* data, size_t size) {
+    if (failed_) return 0;
+    size_t accepted = 0;
+    while (accepted < size) {
+      if (used_ == sizeof(buffer_) && !finish()) break;
+      const size_t remaining = size - accepted;
+      const size_t room = sizeof(buffer_) - used_;
+      const size_t count = remaining < room ? remaining : room;
+      memcpy(buffer_ + used_, data + accepted, count);
+      used_ += count;
+      accepted += count;
+    }
+    return accepted;
+  }
+  bool finish() {
+    if (failed_) return false;
+    if (used_ == 0) return true;
+    const size_t written = client_.write(buffer_, used_);
+    if (profile_) {
+      ++profile_->shareWriteCalls;
+      profile_->shareBytes += written;
+    }
+    // A short/failed write is a broken message, never a submitted share.
+    // The existing caller closes the connection; do not resend its prefix.
+    if (written != used_) { failed_ = true; return false; }
+    used_ = 0;
+    return true;
+  }
+ private:
+  Client& client_;
+  SoloHunterMiningProfile* profile_;
+  uint8_t buffer_[256];
+  size_t used_ = 0;
+  bool failed_ = false;
+};
+
+bool sendDocument(Client& client, JsonDocument& document,
+                  SoloHunterMiningProfile* profile = nullptr) {
+  StratumMessageWriter writer(client, profile);
+  const size_t expected = measureJson(document);
+  if (expected == 0 || serializeJson(document, writer) != expected) return false;
+  return writer.write(static_cast<uint8_t>('\n')) == 1 && writer.finish();
 }
 
 bool sendSubscribe(Client& client, MiningSession& session) {
@@ -910,7 +1116,9 @@ PendingShare* findPending(MiningSession& session, uint32_t id) {
 
 bool sendShare(Client& client, MiningSession& session,
                const SoloHunterMiningConfig& config, uint32_t nonce,
-               double difficulty) {
+               double difficulty, SoloHunterMiningProfile& profile) {
+  const uint32_t submitStartedUs = micros();
+  ++profile.shareSubmitCalls;
   uint32_t requestId = session.nextRequestId++;
   if (session.nextRequestId < 10) session.nextRequestId = 10;
 
@@ -926,7 +1134,9 @@ bool sendShare(Client& client, MiningSession& session,
   params.add(session.job.extranonce2);
   params.add(session.job.ntime);
   params.add(nonceHex);
-  if (!sendDocument(client, request)) return false;
+  const bool sent = sendDocument(client, request, &profile);
+  profile.shareSubmitUs += static_cast<uint32_t>(micros() - submitStartedUs);
+  if (!sent) { ++profile.shareSubmitFailures; return false; }
   rememberPending(session, requestId, difficulty);
   recordSubmittedShare(countPending(session));
   return true;
@@ -1084,26 +1294,63 @@ bool processLine(const String& line, Client& client, MiningSession& session,
   return true;
 }
 
+// Append a span in one allocation/copy, preserving CRLF and split-line
+// semantics. A failed append must never silently turn into a partial JSON job.
+bool appendPoolSpan(MiningSession& session, const char* data, size_t size) {
+  if (size == 0) return true;
+  if (session.rxLine.length() > MAX_STRATUM_LINE ||
+      size > MAX_STRATUM_LINE - session.rxLine.length()) {
+    setStatus("JOB TOO LARGE");
+    return false;
+  }
+  if (!session.rxLine.concat(data, static_cast<unsigned int>(size))) {
+    setStatus("POOL RX MEMORY");
+    return false;
+  }
+  return true;
+}
+
 bool readPoolMessages(Client& client, MiningSession& session,
-                      const SoloHunterMiningConfig& config) {
-  while (client.connected() && client.available() > 0) {
-    char ch = (char)client.read();
-    if (ch == '\r') continue;
-    if (ch == '\n') {
-      if (!session.rxLine.isEmpty()) {
+                      const SoloHunterMiningConfig& config,
+                      SoloHunterMiningProfile& profile) {
+  char buffer[256];
+  size_t consumed = 0;
+  size_t bytesSinceYield = 0;
+  // Bound a single drain pass under a continuously chatty peer. Partial lines
+  // remain in rxLine for the next pass; ordinary jobs fit in one pass.
+  constexpr size_t MAX_DRAIN_BYTES = 32768;
+  while (consumed < MAX_DRAIN_BYTES) {
+    const int available = client.available();
+    if (available <= 0) break;
+    size_t wanted = static_cast<size_t>(available);
+    if (wanted > sizeof(buffer)) wanted = sizeof(buffer);
+    if (wanted > MAX_DRAIN_BYTES - consumed) wanted = MAX_DRAIN_BYTES - consumed;
+    const int count = client.read(reinterpret_cast<uint8_t*>(buffer), wanted);
+    ++profile.poolReadCalls;
+    if (count <= 0) break;
+    if (static_cast<size_t>(count) > wanted) return false;
+    profile.poolReadBytes += count;
+    consumed += count;
+    bytesSinceYield += count;
+    size_t start = 0;
+    for (size_t i = 0; i < static_cast<size_t>(count); ++i) {
+      if (buffer[i] != '\r' && buffer[i] != '\n') continue;
+      if (!appendPoolSpan(session, buffer + start, i - start)) return false;
+      start = i + 1;
+      if (buffer[i] == '\n' && !session.rxLine.isEmpty()) {
+        ++profile.poolMessages;
         if (!processLine(session.rxLine, client, session, config)) {
           session.rxLine = "";
           return false;
         }
         session.rxLine = "";
       }
-      continue;
     }
-    if (session.rxLine.length() >= MAX_STRATUM_LINE) {
-      setStatus("JOB TOO LARGE");
-      return false;
+    if (!appendPoolSpan(session, buffer + start, count - start)) return false;
+    if (bytesSinceYield >= 4096) {
+      bytesSinceYield = 0;
+      vTaskDelay(1);
     }
-    session.rxLine += ch;
   }
   return client.connected();
 }
@@ -1156,7 +1403,8 @@ bool connectPool(Client*& client, WiFiClient& tcpClient, WiFiClientSecure& tlsCl
 
 bool processAuxiliaryCandidates(Client& client, MiningSession& session,
                                 const SoloHunterMiningConfig& config,
-                                bool& bestChanged) {
+                                bool& bestChanged,
+                                SoloHunterMiningProfile& profile) {
   if (auxiliaryCandidateQueue == nullptr) return true;
 
   AuxiliaryCandidate candidate;
@@ -1172,7 +1420,7 @@ bool processAuxiliaryCandidates(Client& client, MiningSession& session,
     if (hashMeetsTarget(candidate.hash, session.shareTarget)) {
       double shareDifficulty = difficultyFromHash(candidate.hash);
       if (!sendShare(client, session, config, candidate.nonce,
-                     shareDifficulty)) {
+                     shareDifficulty, profile)) {
         return false;
       }
     }
@@ -1207,10 +1455,31 @@ void miningTask(void*) {
   float smoothedAuxiliaryHashrateKh = 0.0f;
   uint64_t totalHashes = 0;
   uint8_t hardwareBatchesBeforeDelay = 0;
+  SoloHunterMiningProfile profile;
+  uint32_t profileLoopAtUs = micros();
+  uint32_t profilePublishedAtUs = profileLoopAtUs;
   SoloHunterMiningConfig config;
   PoolEndpoint endpoint;
 
   for (;;) {
+    // Publish at iteration boundaries so elapsed time and work counters cover
+    // the same completed loops. Profiling never changes hashrate accounting.
+    const uint32_t profileNowUs = micros();
+    const uint32_t epoch = helperControlEpoch.load(std::memory_order_relaxed);
+    if (profile.epoch != epoch) {
+      profile = SoloHunterMiningProfile();
+      profile.epoch = epoch;
+      profilePublishedAtUs = profileNowUs;
+    } else {
+      profile.elapsedUs += static_cast<uint32_t>(profileNowUs - profileLoopAtUs);
+    }
+    profileLoopAtUs = profileNowUs;
+    if (static_cast<uint32_t>(profileNowUs - profilePublishedAtUs) >= 1000000U) {
+      lockState();
+      activeProfile = profile;
+      unlockState();
+      profilePublishedAtUs = profileNowUs;
+    }
     uint32_t latestRevision = currentConfigRevision();
     if (latestRevision != appliedRevision) {
       config = copyConfig(latestRevision);
@@ -1265,7 +1534,10 @@ void miningTask(void*) {
       }
     }
 
-    if (!readPoolMessages(*client, session, config)) {
+    const uint32_t poolReadStartedUs = micros();
+    const bool poolReadOk = readPoolMessages(*client, session, config, profile);
+    profile.poolReadUs += static_cast<uint32_t>(micros() - poolReadStartedUs);
+    if (!poolReadOk) {
       stopClient(client, tcpClient, tlsClient, session);
       reconnectAt = millis() + CONNECT_RETRY_MS;
       continue;
@@ -1304,6 +1576,7 @@ void miningTask(void*) {
     }
 
     uint32_t auxiliaryHashes = drainAuxiliaryHashes();
+    profile.helperHashes += auxiliaryHashes;
     hashesInWindow += auxiliaryHashes;
     auxiliaryHashesInWindow += auxiliaryHashes;
     totalHashes += auxiliaryHashes;
@@ -1321,7 +1594,11 @@ void miningTask(void*) {
     }
 
     bool bestChanged = false;
-    if (!processAuxiliaryCandidates(*client, session, config, bestChanged)) {
+    const uint32_t helperCandidatesStartedUs = micros();
+    const bool helperCandidatesOk =
+        processAuxiliaryCandidates(*client, session, config, bestChanged, profile);
+    profile.candidateUs += static_cast<uint32_t>(micros() - helperCandidatesStartedUs);
+    if (!helperCandidatesOk) {
       stopClient(client, tcpClient, tlsClient, session);
       reconnectAt = millis() + CONNECT_RETRY_MS;
       continue;
@@ -1330,20 +1607,35 @@ void miningTask(void*) {
     bool usedHardware = false;
     if (hardwareShaAvailable && session.hardwareReady) {
       SoloHunterSha256Result result;
+      const uint32_t hardwareCallStartedUs = micros();
       usedHardware = soloHunterSha256Mine(
           session.hardwareHeader, session.hardwareNonceSwapped,
           hardwareLeadingZeroMask(session.shareTarget) &
               hardwareLeadingZeroMask(session.blockTarget),
           HARDWARE_HASH_BATCH_SIZE, result);
+      profile.hardwareCallUs += static_cast<uint32_t>(micros() - hardwareCallStartedUs);
+      ++profile.hardwareCalls;
 
       if (usedHardware) {
+        profile.hardwareHashes += result.hashes;
         hashesInWindow += result.hashes;
         primaryHashesInWindow += result.hashes;
         totalHashes += result.hashes;
         if (result.candidate) {
+            const uint32_t candidateStartedUs = micros();
+            ++profile.hardwareCandidates;
+            const uint32_t verificationStartedUs = micros();
             uint8_t verifiedHash[32];
-            if (!hashHeaderNonce(session, result.nonce, verifiedHash) ||
-                memcmp(result.hash, verifiedHash, sizeof(verifiedHash)) != 0) {
+            const bool candidateConfirmed =
+                result.candidateConfirmed &&
+                hashHeaderNonce(session, result.nonce, verifiedHash) &&
+                memcmp(result.hash, verifiedHash, sizeof(verifiedHash)) == 0;
+            profile.candidateVerifyUs +=
+                static_cast<uint32_t>(micros() - verificationStartedUs);
+            if (candidateConfirmed) ++profile.confirmedCandidates;
+            const bool recoveryRequired =
+                soloHunterSha256RecordCandidateValidation(candidateConfirmed);
+            if (!candidateConfirmed && recoveryRequired) {
               session.job.nextNonce =
                   __builtin_bswap32(session.hardwareNonceSwapped);
               if (soloHunterSha256Recover()) {
@@ -1358,7 +1650,7 @@ void miningTask(void*) {
                 hardwareRetryAt = millis() + HARDWARE_RETRY_MS;
                 setStatus("SHA RETRY");
               }
-            } else {
+            } else if (candidateConfirmed) {
               memcpy(hash, verifiedHash, sizeof(hash));
               if (hashIsBetter(hash, session.bestHash)) {
                 memcpy(session.bestHash, hash, sizeof(session.bestHash));
@@ -1370,12 +1662,13 @@ void miningTask(void*) {
               if (hashMeetsTarget(hash, session.shareTarget)) {
                 double shareDifficulty = difficultyFromHash(hash);
                 if (!sendShare(*client, session, config, result.nonce,
-                               shareDifficulty)) {
+                               shareDifficulty, profile)) {
                   stopClient(client, tcpClient, tlsClient, session);
                   reconnectAt = millis() + CONNECT_RETRY_MS;
                 }
               }
             }
+            profile.candidateUs += static_cast<uint32_t>(micros() - candidateStartedUs);
         }
       }
     }
@@ -1388,6 +1681,7 @@ void miningTask(void*) {
           session.job.valid = false;
           break;
         }
+        ++profile.softwareHashes;
         hashesInWindow++;
         primaryHashesInWindow++;
         totalHashes++;
@@ -1400,7 +1694,7 @@ void miningTask(void*) {
         }
         if (hashMeetsTarget(hash, session.shareTarget)) {
           double shareDifficulty = difficultyFromHash(hash);
-          if (!sendShare(*client, session, config, nonce, shareDifficulty)) {
+          if (!sendShare(*client, session, config, nonce, shareDifficulty, profile)) {
             stopClient(client, tcpClient, tlsClient, session);
             reconnectAt = millis() + CONNECT_RETRY_MS;
             break;
@@ -1470,13 +1764,13 @@ void soloHunterMinerBegin(const SoloHunterMiningConfig& config) {
   if (ENABLE_AUXILIARY_MINING && auxiliaryMinerTaskHandle == nullptr &&
       auxiliaryCandidateQueue != nullptr) {
     BaseType_t created = xTaskCreatePinnedToCore(
-        auxiliaryMiningTask, "helios-miner0", 6144, nullptr, 0,
+        auxiliaryMiningTask, "helios-miner0", 6144, nullptr, AUXILIARY_TASK_PRIORITY,
         &auxiliaryMinerTaskHandle, 0);
     if (created != pdPASS) auxiliaryMinerTaskHandle = nullptr;
   }
   if (minerTaskHandle == nullptr) {
     BaseType_t created =
-        xTaskCreatePinnedToCore(miningTask, "helios-miner1", 16384, nullptr, 2,
+        xTaskCreatePinnedToCore(miningTask, "helios-miner1", 16384, nullptr, 19,
                                 &minerTaskHandle, 1);
     if (created != pdPASS) {
       minerTaskHandle = nullptr;
@@ -1516,6 +1810,13 @@ SoloHunterMiningStats soloHunterMinerGetStats(bool includeStack) {
       statsStartedAt > 0 ? (uint32_t)((millis() - statsStartedAt) / 1000U) : 0;
   unlockState();
   if (includeStack) {
+    copy.auxiliaryMode = auxiliaryMode.load(std::memory_order_relaxed);
+    copy.auxiliarySliceYields = auxiliarySliceYields.load(std::memory_order_relaxed);
+    copy.auxiliaryBalanceWaits = auxiliaryBalanceWaits.load(std::memory_order_relaxed);
+    copy.auxiliaryPartialBatches = auxiliaryPartialBatches.load(std::memory_order_relaxed);
+    copy.auxiliaryRunBudgetUs = auxiliaryRunBudgetUs.load(std::memory_order_relaxed);
+    copy.auxiliaryIdleTicks = AUXILIARY_IDLE_TICKS;
+    copy.auxiliaryTaskPriority = AUXILIARY_TASK_PRIORITY;
     copy.primaryStackFreeBytes =
         minerTaskHandle
             ? static_cast<uint32_t>(
@@ -1527,5 +1828,31 @@ SoloHunterMiningStats soloHunterMinerGetStats(bool includeStack) {
                   uxTaskGetStackHighWaterMark(auxiliaryMinerTaskHandle))
             : 0;
   }
+  return copy;
+}
+
+bool soloHunterMinerSetHelperEnabled(bool enabled) {
+  if (!auxiliaryMinerTaskHandle) return false;
+  if (auxiliaryEnabled.exchange(enabled, std::memory_order_relaxed) != enabled) {
+    helperControlEpoch.fetch_add(1, std::memory_order_relaxed);
+  }
+  return true;
+}
+
+bool soloHunterMinerSetHelperRunBudgetUs(uint32_t budgetUs) {
+  if (!auxiliaryMinerTaskHandle || (budgetUs != 20000 && budgetUs != 40000))
+    return false;
+  if (auxiliaryRunBudgetUs.exchange(budgetUs, std::memory_order_relaxed) != budgetUs)
+    helperControlEpoch.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+SoloHunterMiningProfile soloHunterMinerGetProfile() {
+  lockState();
+  SoloHunterMiningProfile copy = activeProfile;
+  unlockState();
+  copy.helperEnabled = auxiliaryEnabled.load(std::memory_order_relaxed);
+  copy.helperRunBudgetUs = auxiliaryRunBudgetUs.load(std::memory_order_relaxed);
+  copy.controlEpoch = helperControlEpoch.load(std::memory_order_relaxed);
   return copy;
 }

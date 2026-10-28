@@ -12,38 +12,44 @@ For support, I can be reached in the `SOLO_HUNTER` channel of the HeliosPool Dis
 
 Two display versions are available:
 
-- `HELIOS_HUNTER_ILI9341_v1.0.10_merged.bin` for ILI9341 panels
-- `HELIOS_HUNTER_ST7789_v1.0.10_merged.bin` for ST7789 panels
+- `HELIOS_HUNTER_ILI9341_v1.0.11_merged.bin` for ILI9341 panels
+- `HELIOS_HUNTER_ST7789_v1.0.11_merged.bin` for ST7789 panels
 
 Use only the firmware version that matches the display controller in your CYD.
 
-## What's New in v1.0.10
+## What's New in v1.0.11
 
-- Added Zcash (`ZEC`) transparent-address balance monitoring to both display
-  versions with fiat value, official logo, web tab, rear-LED color, caching,
-  and balance-increase alerts.
-- Added the HeliosPool `zec.heliospool.com:3340` profile and placed ZEC between
-  XEC and BCH without moving any existing saved-setting indexes.
-- Added circular screen navigation: swiping forward from BTC returns to the
-  HeliosPool home screen, and swiping backward from Home opens BTC.
-- Limited ZEC explorer responses to reduce network traffic and ESP32 heap use.
-- Preserved the validated FAST SHA mining engine. ZEC monitoring is separate
-  from mining because Zcash uses Equihash rather than SHA-256d.
+- Added Garlicoin (GRLC) balances, logo, fiat prices, matching LED color and
+  balance-increase alerts between WJK and FIX.
+- Added a saved "Show on device" checkbox on every coin's web tab. Hidden
+  pages are skipped in both directions; Home always remains available.
+- Improved balance scheduling, price caching/fallbacks, TLS timeouts and memory
+  use, including native flash-pixel logo drawing.
+- Improved software-helper scheduling and buffered pool communication, with
+  additional mining and reset diagnostics.
+- Updated the pipelined hardware SHA engine with validated fallbacks.
+- Added EUR alongside USD/CAD/GBP and kept all hashrates in kH/s.
 
-Pool reconnects can still occur, and long-term restart stability remains under observation. This release does not promise zero watchdog resets. See [CHANGELOG.md](CHANGELOG.md) for details.
+GRLC and ZEC are balance tracking only. The miner uses SHA-256d. Actual
+hashrate depends on hardware and runtime conditions; this release does not
+promise a particular speed or zero watchdog resets.
 
 ## Features
 
 - Hardware-accelerated ESP32 SHA-256d mining
 - User-configurable pool, port, username, worker, and password
 - Mining remains independent from the selected balance screen
-- Screen order: HeliosPool, CHTA, WJK, FIX, DGB, XEC, ZEC, BCH, BTC
+- Screen order: HeliosPool, CHTA, WJK, GRLC, FIX, DGB, XEC, ZEC, BCH, BTC
 - Looping swipe navigation and matching rear-LED colors
+- Per-coin "Show on device" checkboxes in the web UI, saved across restarts
 - Live hashrate, accepted/rejected shares, and best difficulty on every page
-- Address balances and a selectable USD, CAD, or GBP value
+- Address balances and a selectable USD, CAD, GBP, or EUR value
 - Block-found style notification when a tracked balance increases
 - Browser-based setup and management UI
 - Persistent Wi-Fi, mining, wallet, currency, brightness, and rotation settings
+
+Third-party performance code and its required license notices are documented
+in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Hardware
 
@@ -61,8 +67,8 @@ required**.
 
 Download the merged `.bin` file that matches your display from the [latest GitHub release](https://github.com/XTVDDICT/HELIOS_HUNTER/releases/latest):
 
-- `HELIOS_HUNTER_ILI9341_v1.0.10_merged.bin`
-- `HELIOS_HUNTER_ST7789_v1.0.10_merged.bin`
+- `HELIOS_HUNTER_ILI9341_v1.0.11_merged.bin`
+- `HELIOS_HUNTER_ST7789_v1.0.11_merged.bin`
 
 Use an ESP32-compatible flashing tool and connect the CYD to your computer with USB.
 
@@ -81,17 +87,17 @@ partition layout.
 
 Download the update file matching the device's screen:
 
-- `HELIOS_HUNTER_ILI9341_v1.0.10_update.bin`
-- `HELIOS_HUNTER_ST7789_v1.0.10_update.bin`
+- `HELIOS_HUNTER_ILI9341_v1.0.11_update.bin`
+- `HELIOS_HUNTER_ST7789_v1.0.11_update.bin`
 
 1. In the ESP32 flasher, select only the matching `_update.bin` file.
-2. Set its flash address to `0x10000`.
+2. Set its flash address to `0x10000` (four zeros after the 1, **not `0x1000`**).
 3. Set **Erase Flash** to **No Erase**, or disable full-chip erase.
 4. Flash the update and restart the device.
 
 The update image replaces only the application. It leaves the NVS settings at
 `0x9000` untouched, preserving Wi-Fi, mining, wallet, currency, brightness,
-LED, sleep, and rotation settings. Do not use this method if the flasher cannot
+LED, sleep, rotation, and coin-page visibility settings. Do not use this method if the flasher cannot
 select `0x10000` and disable erase.
 
 ### Important
@@ -111,7 +117,7 @@ Flashing the wrong display version may result in a blank, distorted, incorrectly
 4. Select the Wi-Fi network the miner should use.
 5. Once connected, open the IP address shown on the Helios screen.
 6. Use the **Mining** tab to configure any compatible SHA-256d Stratum pool.
-7. Use each coin tab to save the address whose balance should be displayed.
+7. Use each coin tab to save its balance address and choose **Show on device**.
 
 Changing or viewing a coin does not change the active mining pool.
 

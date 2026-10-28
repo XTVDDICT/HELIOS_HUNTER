@@ -5,7 +5,15 @@
 #include <esp_system.h>
 #include <esp_wifi.h>
 
+#if defined(ARDUINO_RUNNING_CORE) && ARDUINO_RUNNING_CORE != 0
+#error "HELIOS_HUNTER R22 requires Tools > Arduino Runs On > Core 0"
+#endif
+#if defined(ARDUINO_EVENT_RUNNING_CORE) && ARDUINO_EVENT_RUNNING_CORE != 0
+#error "HELIOS_HUNTER R22 requires Tools > Events Run On > Core 0"
+#endif
+
 #include "HeliosCoins.h"
+#include "HeliosDiagnostics.h"
 #include "HeliosDisplay.h"
 #include "HeliosMiner.h"
 #include "HeliosSettings.h"
@@ -39,7 +47,7 @@ WifiCredentialState wifiCredentialState = WifiCredentialState::Unavailable;
 
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 10000U;
 constexpr uint8_t WIFI_RECONNECTS_BEFORE_RESTART = 6;
-constexpr char BUILD_ID[] = "R21_ZEC_LOOP_20261017";
+constexpr char BUILD_ID[] = "R23_GRLC_BALANCE_MINING_20261028";
 
 HeliosMiningConfig miningConfig() {
   const HeliosSettingsData& saved = settings.data();
@@ -150,6 +158,7 @@ void startNetworkServices() {
 }
 
 void serviceForeground() {
+  heliosMarkUi(HeliosUiStage::Wifi);
   wifiManager.process();
   bool wifiConnected = WiFi.status() == WL_CONNECTED;
   if (wifiConnected) {
@@ -161,8 +170,13 @@ void serviceForeground() {
     retrySavedWifi();
   }
   startNetworkServices();
-  if (networkServicesStarted) web.loop();
+  if (networkServicesStarted) {
+    heliosMarkUi(HeliosUiStage::Web);
+    web.loop();
+  }
+  heliosMarkUi(HeliosUiStage::Display);
   screen.loop();
+  heliosMarkUi(HeliosUiStage::Waiting);
 }
 
 void foregroundTask(void*) {
@@ -175,6 +189,7 @@ void foregroundTask(void*) {
 }  // namespace
 
 void setup() {
+  heliosDiagnosticsBegin();
   Serial.begin(115200);
   delay(100);
   Serial.printf("Build: %s\n", BUILD_ID);
@@ -196,7 +211,7 @@ void setup() {
   screen.showHome();
 
   BaseType_t created = xTaskCreatePinnedToCore(
-      foregroundTask, "helios-ui", 12288, nullptr, 2,
+      foregroundTask, "helios-ui", 12288, nullptr, tskIDLE_PRIORITY,
       &foregroundTaskHandle, 0);
   if (created != pdPASS) foregroundTaskHandle = nullptr;
   Serial.println();

@@ -5,6 +5,10 @@
 struct SoloHunterSha256Result {
   uint32_t hashes = 0;
   bool candidate = false;
+  // Pipelined-v2 keeps only a 16-bit candidate signal in hardware. Its full
+  // digest is recomputed at the rare candidate boundary, and this flag says
+  // whether that digest confirms the signal.
+  bool candidateConfirmed = true;
   uint32_t nonce = 0;
   uint8_t hash[32] = {0};
 };
@@ -33,6 +37,8 @@ bool soloHunterSha256GetFailure(SoloHunterSha256Failure& output);
 bool soloHunterSha256Begin();
 bool soloHunterSha256FastPathActive();
 bool soloHunterSha256Recover();
+// Returns true only when persistent candidate mismatches justify recovery.
+bool soloHunterSha256RecordCandidateValidation(bool confirmed);
 const char* soloHunterSha256LastFault();
 const char* soloHunterSha256LastFallback();
 const char* soloHunterSha256LastSelfTestFailure();

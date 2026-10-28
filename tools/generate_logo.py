@@ -1,4 +1,4 @@
-"""Build compact PNG assets for the HELIOS_HUNTER screen."""
+"""Build native RGB565 flash assets for the HELIOS_HUNTER screen."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ ASSETS = (
     ("HELIOS_MAIN", "heliospool-main.png", (136, 98), False),
     ("CHTA_LOGO", "chta.png", (72, 72), False),
     ("WJK_LOGO", "wjk.png", (72, 72), True),
+    ("GRLC_LOGO", "grlc.png", (72, 72), False),
     ("DGB_LOGO", "dgb.png", (72, 72), False),
     ("BCH_LOGO", "bch.png", (72, 72), False),
     ("BTC_LOGO", "btc.png", (72, 72), False),
@@ -50,10 +51,10 @@ def screen_png(path: Path, size: tuple[int, int], circle: bool) -> bytes:
     return buffer.getvalue()
 
 
-def array_lines(data: bytes) -> str:
+def array_lines(data: list[int]) -> str:
     rows = []
     for offset in range(0, len(data), 16):
-        values = ", ".join(f"0x{value:02X}" for value in data[offset : offset + 16])
+        values = ", ".join(f"0x{value:04X}" for value in data[offset : offset + 16])
         rows.append(f"    {values},")
     return "\n".join(rows)
 
@@ -72,19 +73,21 @@ def main() -> None:
         "// Generated from assets/ by tools/generate_logo.py.",
     ]
     for name, filename, size, circle in ASSETS:
-        data = screen_png(asset_dir / filename, size, circle)
+        png = screen_png(asset_dir / filename, size, circle)
+        image = Image.open(io.BytesIO(png)).convert("RGB")
+        data = [(red >> 3) << 11 | (green >> 2) << 5 | (blue >> 3)
+                for red, green, blue in image.getdata()]
         blocks.extend(
             (
                 f"constexpr uint16_t {name}_WIDTH = {size[0]};",
                 f"constexpr uint16_t {name}_HEIGHT = {size[1]};",
-                f"const uint8_t {name}[] PROGMEM = {{",
+                f"const uint16_t {name}_RGB565[] PROGMEM = {{",
                 array_lines(data),
                 "};",
-                f"constexpr size_t {name}_SIZE = sizeof({name});",
                 "",
             )
         )
-        print(f"{name}: {len(data)} bytes")
+        print(f"{name}: {len(data) * 2} flash bytes")
 
     output_path.write_text("\n".join(blocks), encoding="ascii", newline="\n")
 

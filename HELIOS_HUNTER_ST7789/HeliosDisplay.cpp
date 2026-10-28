@@ -1,5 +1,6 @@
 #include "HeliosDisplay.h"
 #include "HeliosPanel.h"
+#include "HeliosNetworkMemory.h"
 
 #include <SPI.h>
 #include <WiFi.h>
@@ -113,31 +114,35 @@ void drawValue(int16_t x, int16_t y, int16_t width, const String& value,
   display.drawString(value, x, y, 2);
 }
 
-struct PngAsset {
-  const uint8_t* data;
-  size_t size;
+struct RgbAsset {
+  const uint16_t* data;
 };
 
-PngAsset coinLogo(HeliosCoin coin) {
+RgbAsset coinLogo(HeliosCoin coin) {
   switch (coin) {
-    case HeliosCoin::CHTA:
-      return {CHTA_LOGO, CHTA_LOGO_SIZE};
-    case HeliosCoin::WJK:
-      return {WJK_LOGO, WJK_LOGO_SIZE};
-    case HeliosCoin::DGB:
-      return {DGB_LOGO, DGB_LOGO_SIZE};
-    case HeliosCoin::BCH:
-      return {BCH_LOGO, BCH_LOGO_SIZE};
-    case HeliosCoin::BTC:
-      return {BTC_LOGO, BTC_LOGO_SIZE};
-    case HeliosCoin::FIX:
-      return {FIX_LOGO, FIX_LOGO_SIZE};
-    case HeliosCoin::XEC:
-      return {XEC_LOGO, XEC_LOGO_SIZE};
-    case HeliosCoin::ZEC:
-      return {ZEC_LOGO, ZEC_LOGO_SIZE};
+    case HeliosCoin::CHTA: return {CHTA_LOGO_RGB565};
+    case HeliosCoin::WJK: return {WJK_LOGO_RGB565};
+    case HeliosCoin::GRLC: return {GRLC_LOGO_RGB565};
+    case HeliosCoin::FIX: return {FIX_LOGO_RGB565};
+    case HeliosCoin::DGB: return {DGB_LOGO_RGB565};
+    case HeliosCoin::XEC: return {XEC_LOGO_RGB565};
+    case HeliosCoin::ZEC: return {ZEC_LOGO_RGB565};
+    case HeliosCoin::BCH: return {BCH_LOGO_RGB565};
+    case HeliosCoin::BTC: return {BTC_LOGO_RGB565};
+    default: return {nullptr};
   }
-  return {BTC_LOGO, BTC_LOGO_SIZE};
+}
+
+void drawNativePixels(int16_t x, int16_t y, uint16_t width, uint16_t height,
+                      const uint16_t* pixels) {
+  const bool previousSwap = display.getSwapBytes();
+  display.setSwapBytes(true);
+  for (uint16_t row = 0; row < height; ++row) {
+    display.pushImage(x, y + row, width, 1,
+                      pixels + static_cast<size_t>(row) * width);
+    if ((row & 7U) == 7U) vTaskDelay(1);
+  }
+  display.setSwapBytes(previousSwap);
 }
 
 void drawBorder(uint16_t accent) {
@@ -176,6 +181,11 @@ void HeliosDisplay::begin(HeliosSettings* settings, HeliosBalances* balances) {
 
 void HeliosDisplay::loop() {
   const HeliosSettingsData& cfg = settings_->data();
+  if (!pageVisible(page_)) {
+    page_ = 0;
+    touching_ = false;
+    redrawRequested_ = true;
+  }
   if (cfg.brightness != appliedBrightness_) {
     appliedBrightness_ = cfg.brightness;
     if (!screenSleeping_) display.setBrightness(appliedBrightness_);
@@ -237,7 +247,6 @@ uint8_t HeliosDisplay::page() const { return page_; }
 void HeliosDisplay::requestRedraw() { redrawRequested_ = true; }
 
 String HeliosDisplay::rateText(float kh) const {
-  if (kh >= 1000.0f) return String(kh / 1000.0f, 2) + " MH/s";
   return String(kh, 0) + " kH/s";
 }
 
@@ -245,7 +254,8 @@ void HeliosDisplay::drawHome(const HeliosMiningStats& stats) {
   const HeliosSettingsData& cfg = settings_->data();
   display.fillScreen(BLACK);
   drawBorder(HELIOS_GREEN);
-  display.drawPng(HELIOS_MAIN, HELIOS_MAIN_SIZE, 177, 6);
+  drawNativePixels(177, 6, HELIOS_MAIN_WIDTH, HELIOS_MAIN_HEIGHT,
+                   HELIOS_MAIN_RGB565);
 
   display.setTextDatum(lgfx::top_left);
   display.setTextColor(HELIOS_GREEN, BLACK);
@@ -303,7 +313,7 @@ void HeliosDisplay::drawHomeValues(const HeliosMiningStats& stats) {
   display.drawString(String(stats.blocksFound), 169, 91, 2);
   uint8_t currency = settings_->data().fiatCurrency;
   const char* currencySymbol =
-      currency == 1 ? "C$" : currency == 2 ? "\xC2\xA3" : "$";
+      currency == 3 ? "EUR " : currency == 1 ? "C$" : currency == 2 ? "\xC2\xA3" : "$";
   bool totalAvailable = false;
   double total = balances_ ? balances_->fiatTotal(currency, totalAvailable) : 0.0;
   String totalText =
@@ -337,8 +347,8 @@ void HeliosDisplay::drawCoin(const HeliosCoinProfile& profile,
                              const HeliosMiningStats& stats) {
   display.fillScreen(BLACK);
   drawBorder(profile.color);
-  PngAsset logo = coinLogo(profile.id);
-  display.drawPng(logo.data, logo.size, 238, 7);
+  RgbAsset logo = coinLogo(profile.id);
+  if (logo.data) drawNativePixels(238, 7, 72, 72, logo.data);
 
   display.setTextDatum(lgfx::top_left);
   display.setTextColor(HELIOS_GREEN, BLACK);
@@ -386,8 +396,9 @@ void HeliosDisplay::drawCoinValues(const HeliosCoinProfile& profile,
   display.setTextColor(WHITE, PANEL);
   uint8_t currency = settings_->data().fiatCurrency;
   const char* currencySymbol =
-      currency == 1 ? "C$" : currency == 2 ? "\xC2\xA3" : "$";
-  double price = currency == 1 ? snapshot.priceCad
+      currency == 3 ? "EUR " : currency == 1 ? "C$" : currency == 2 ? "\xC2\xA3" : "$";
+  double price = currency == 3 ? snapshot.priceEur
+                               : currency == 1 ? snapshot.priceCad
                                : currency == 2 ? snapshot.priceGbp
                                                : snapshot.priceUsd;
   String fiat = snapshot.available && snapshot.pricesAvailable
@@ -428,6 +439,7 @@ void HeliosDisplay::checkBalanceIncreases() {
 }
 
 void HeliosDisplay::drawBlockPopup() {
+  HeliosDisplayWorkGuard displayWork;
   const HeliosCoinProfile& profile = heliosCoinProfile(blockPopupCoin_);
   setRearLed(profile.color);
   constexpr int16_t width = 240;
@@ -504,12 +516,33 @@ void HeliosDisplay::wakeScreen() {
   draw(true);
 }
 
+bool HeliosDisplay::pageVisible(uint8_t page) const {
+  return page == 0 ||
+      (settings_ && page <= HELIOS_COIN_COUNT &&
+       settings_->coinVisible(heliosDisplayCoinProfileAt(page - 1).id));
+}
+
+uint8_t HeliosDisplay::nextVisiblePage(bool forward) const {
+  uint8_t candidate = page_;
+  for (size_t i = 0; i <= HELIOS_COIN_COUNT; ++i) {
+    candidate = forward ? (candidate < HELIOS_COIN_COUNT ? candidate + 1 : 0)
+                        : (candidate > 0 ? candidate - 1 : HELIOS_COIN_COUNT);
+    if (pageVisible(candidate)) return candidate;
+  }
+  return 0;
+}
+
 void HeliosDisplay::drawFooter(uint16_t accent) {
-  display.fillRect(118, 224, 84, 12, BLACK);
-  constexpr uint8_t pageCount = HELIOS_COIN_COUNT + 1;
-  constexpr int16_t firstX = 160 - (HELIOS_COIN_COUNT * 13) / 2;
-  for (uint8_t i = 0; i < pageCount; ++i) {
-    int16_t x = firstX + i * 13;
+  display.fillRect(4, 224, 312, 12, BLACK);
+  uint8_t pageCount = 1;
+  for (uint8_t i = 1; i <= HELIOS_COIN_COUNT; ++i) {
+    if (pageVisible(i)) ++pageCount;
+  }
+  const int16_t firstX = 160 - ((pageCount - 1) * 13) / 2;
+  uint8_t dot = 0;
+  for (uint8_t i = 0; i <= HELIOS_COIN_COUNT; ++i) {
+    if (!pageVisible(i)) continue;
+    const int16_t x = firstX + dot++ * 13;
     display.fillCircle(x, 229, i == page_ ? 3 : 2,
                        i == page_ ? accent : PANEL_LIGHT);
   }
@@ -535,6 +568,7 @@ String HeliosDisplay::fiatText(double value) const {
 void HeliosDisplay::draw(bool force) {
   if (!settings_ || screenSleeping_) return;
   if (!force && millis() - lastDrawAt_ < STATS_REFRESH_MS - 100) return;
+  HeliosDisplayWorkGuard displayWork;
   if (force) updateRearLed();
   lastDrawAt_ = millis();
   HeliosMiningStats stats = heliosMinerGetStats();
@@ -596,19 +630,19 @@ void HeliosDisplay::handleTouch() {
   int32_t primaryDelta = abs(dx) >= abs(dy) ? dx : dy;
   if (abs(primaryDelta) >= SWIPE_DISTANCE) {
     if (primaryDelta < 0) {
-      page_ = page_ < HELIOS_COIN_COUNT ? page_ + 1 : 0;
+      page_ = nextVisiblePage(true);
     } else {
-      page_ = page_ > 0 ? page_ - 1 : HELIOS_COIN_COUNT;
+      page_ = nextVisiblePage(false);
     }
     draw(true);
     return;
   }
 
   if (touchLastX_ > 2400) {
-    page_ = page_ < HELIOS_COIN_COUNT ? page_ + 1 : 0;
+    page_ = nextVisiblePage(true);
     draw(true);
   } else if (touchLastX_ < 1600) {
-    page_ = page_ > 0 ? page_ - 1 : HELIOS_COIN_COUNT;
+    page_ = nextVisiblePage(false);
     draw(true);
   }
 

@@ -11,6 +11,7 @@ enum class HeliosCoin : uint8_t {
   FIX,
   XEC,
   ZEC,
+  GRLC,  // Append: existing wallet and balance-cache indexes must not move.
   Count
 };
 

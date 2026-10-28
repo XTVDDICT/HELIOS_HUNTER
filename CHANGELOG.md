@@ -1,5 +1,51 @@
 # Changelog
 
+## v1.0.11 - 2026-10-28
+
+- Add an auto-saving "Show on device" checkbox to every coin's web tab.
+  Persist page visibility, skip hidden pages in both swipe directions and
+  ST touch navigation, and show page dots only for visible pages. Home remains
+  available even with every coin hidden. Wallets, tracking and mining remain
+  configured independently of page visibility.
+- Add Garlicoin (GRLC) after WJK and before FIX on the device and web UI:
+  logo, matching LED color, address balances, fiat prices, persisted cache and
+  touch-dismissed balance-increase notifications.
+- Append GRLC's persistent index without moving the existing ZEC or other
+  wallet/cache indexes. GRLC is balance tracking only.
+- Port sequential fair balance scheduling, saved-wallet priority, price
+  caching/retries, CoinGecko fallbacks, corrected XEC Electrum units and ZEC
+  transparent-address provider handling from the personal edition.
+- Port bounded cooperative TLS, HTTP transport lifetime fixes and network
+  memory arbitration between balance refreshes and web requests.
+- Keep the last complete dashboard snapshot on failed requests; bound stalled
+  polls and reject incomplete server JSON rather than publishing partial data.
+- Port bounded helper scheduling, display/balance cooperation, buffered
+  Stratum traffic and mining/watchdog/crash diagnostics. Retain the hardware
+  SHA assembly and timing unchanged.
+- Draw coin and home logos directly from native RGB565 flash pixels with short
+  cooperative row writes, avoiding PNG decoder heap allocation.
+- Add EUR valuation alongside USD/CAD/GBP. Show all hashrates in kH/s, including
+  values above 1,000.
+- Preserve the public Helios branding, screen layout and setup SSID.
+- Source checks only: the user compiles, exports and validates on both devices.
+
+### Mining engine
+
+- Add a measured 247-cycle classic-ESP32 hardware SHA pipeline with
+  contention-safe register spacing and a 257-cycle margin fallback.
+- Preserve the established 920 kH/s native loop as the next fallback instead
+  of replacing the known-good engine.
+- Add a 262,144-nonce known-answer test and keep full software verification of
+  every reported hardware candidate.
+- Require persistent candidate errors before recovering the SHA engine so one
+  transient read cannot cause a needless speed fallback.
+- Add an assembly SHA256d prefilter to the core-0 helper and verify its bake
+  integration against the Bitcoin genesis header during startup.
+- Reserve core 1 for the priority-19 hardware miner; move Arduino and event
+  processing to core 0 with the UI, Wi-Fi services and helper.
+- Retain the variable-mask legacy loop for unusually easy targets that cannot
+  use the fixed 16-bit pipelined prefilter.
+
 ## v1.0.10 - 2026-10-21
 
 - Add Zcash (`ZEC`) balance monitoring to both display versions with the

@@ -37,8 +37,8 @@ Use these settings under **Tools**:
 | Partition Scheme | Huge APP (3MB No OTA/1MB SPIFFS) |
 | Core Debug Level | None |
 | Erase All Flash Before Sketch Upload | Disabled |
-| Arduino Runs On | Core 1 |
-| Events Run On | Core 1 |
+| Arduino Runs On | Core 0 |
+| Events Run On | Core 0 |
 | Zigbee Mode | Disabled |
 
 Choose the correct COM port, then use **Sketch > Verify/Compile** followed by
@@ -46,9 +46,14 @@ Choose the correct COM port, then use **Sketch > Verify/Compile** followed by
 
 ## Hashrate Release Gate
 
-Hashrate is a release requirement. The native SHA loop has a fixed 32-byte
-function boundary and internal padding that preserve the cache position of the
-measured 920 kH/s build. Do not remove or alter that alignment or padding.
+Hashrate is a release requirement. R22 first tests a 247-cycle IRAM SHA loop,
+then its 257-cycle margin variant, while retaining the fixed-position native
+loop from the measured 920 kH/s build as a fallback. Do not remove or alter the
+legacy loop's alignment or padding.
+
+Core placement is also part of the mining design. Arduino and event processing
+must run on core 0 so the priority-19 hardware miner owns core 1. The UI,
+Wi-Fi work and low-priority software helper share core 0.
 
 Before publishing either display version, test it on the same CYD and pool as
 the current reference image. A new build must retain `HARDWARE SHA FAST`, must
@@ -62,8 +67,9 @@ After compiling, verify the private ELF before testing the device:
 powershell -ExecutionPolicy Bypass -File tools/Check-FastShaLayout.ps1 <path-to-sketch.elf>
 ```
 
-The check must report `PASS`. Keep the ELF private; do not include it in a
-release.
+The check must report `PASS` and list the pipelined-v2 fast loop, margin
+loop, and software prefilter at ESP32 IRAM addresses. Keep the ELF private; do
+not include it in a release.
 
 ## Export a Shareable Binary
 
@@ -89,6 +95,10 @@ Both display sketches serve the same gzip asset. Do not edit the generated
 
 ## Regenerate Display Assets
 
+R23 stores logos as native RGB565 pixels in the existing `HeliosAssets.h`.
+This avoids decoder allocations while changing screens. The home artwork
+remains the public HeliosPool logo; GRLC uses the Garlicoin project logo.
+
 The original PNG artwork lives in `assets/`. After changing a logo, regenerate
 the shared display header and copy the result to the other screen folder:
 
@@ -102,7 +112,7 @@ Both screen versions use identical artwork, so their generated
 ## Prepare a Public Release Copy
 
 Compiled libraries may embed your local computer paths in assertion/debug
-strings even when no wallet or Wi-Fi settings are compiled in. The v1.0.10
+strings even when no wallet or Wi-Fi settings are compiled in. The v1.0.11
 release copies use the included Node.js tool to remove those personal prefixes:
 
 ```text
@@ -110,7 +120,7 @@ node tools/Prepare-ReleaseImage.cjs input.merged.bin output.merged.bin output.up
 node tools/Prepare-ReleaseImage.cjs --test
 ```
 
-This tool is pinned to the R21/v1.0.10 build. It accepts only a 4 MB merged image
+This tool is pinned to the R23/v1.0.11 build. It accepts only a 4 MB merged image
 with one application partition and blank user-data partitions. It modifies
 read-only debug-path prefixes only, preserves string lengths and executable
 instructions, and regenerates and checks the ESP32 checksum/SHA-256 footers.
@@ -130,7 +140,7 @@ only debug-path strings and integrity footers differ in the public release copy.
 The equivalent fully qualified board name is:
 
 ```text
-esp32:esp32:jczn_2432s028r:UploadSpeed=921600,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=4M,PartitionScheme=huge_app,DebugLevel=none,EraseFlash=none,LoopCore=1,EventsCore=1
+esp32:esp32:jczn_2432s028r:UploadSpeed=921600,CPUFreq=240,FlashFreq=80,FlashMode=qio,FlashSize=4M,PartitionScheme=huge_app,DebugLevel=none,EraseFlash=none,LoopCore=0,EventsCore=0
 ```
 
 Use Arduino IDE's **Verify/Compile** command to validate the selected sketch

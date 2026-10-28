@@ -85,8 +85,8 @@ function prepare(original, requireBuild = true) {
   assert(isBlank(original, images[1].end, apps[0].offset + apps[0].size),
     'Application has extra/signature data');
   if (requireBuild) {
-    assert(original.includes(Buffer.from('R21_ZEC_LOOP_20261017')),
-      'Not the R21 ZEC loop build');
+    assert(original.includes(Buffer.from('R23_GRLC_BALANCE_MINING_20261028')),
+      'Not the R23 GRLC balance/mining build');
   }
   const output = Buffer.from(original);
   const allowed = new Uint8Array(output.length);
@@ -184,7 +184,7 @@ function tests() {
   const signed = Buffer.from(input);
   signed[0x10000 + app.length + 32] = 0xe7;
   assert.throws(() => prepare(signed, false), /extra\/signature/);
-  assert.throws(() => prepare(input), /Not the R21/);
+  assert.throws(() => prepare(input), /Not the R23/);
   console.log('PASS: path removal, unchanged code, image checksums/hashes, idempotence, populated-NVS and signature rejection.');
 }
 

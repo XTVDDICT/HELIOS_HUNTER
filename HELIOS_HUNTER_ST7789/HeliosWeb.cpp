@@ -3,16 +3,21 @@
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <esp_system.h>
+#include <esp_app_desc.h>
+#include <esp_core_dump.h>
+#include <esp_idf_version.h>
 #include <freertos/task.h>
 #include <string.h>
 
 #include "HeliosMiner.h"
+#include "HeliosDiagnostics.h"
+#include "HeliosNetworkMemory.h"
 #include "HeliosWebPageGzip.h"
 #include "SoloHunterSha256.h"
 
 namespace {
 
-constexpr char FIRMWARE_BUILD[] = "R21_ZEC_LOOP_20261017";
+constexpr char FIRMWARE_BUILD[] = "R23_GRLC_BALANCE_MINING_20261028";
 
 class BufferedNetworkWriter : public Print {
  public:
@@ -46,6 +51,8 @@ class BufferedNetworkWriter : public Print {
         return false;
       }
       offset += written;
+      // A slow browser must leave CPU time for idle and the balance worker.
+      vTaskDelay(1);
     }
     used_ = 0;
     return true;
@@ -124,12 +131,93 @@ void writeResponseHeader(NetworkClient& client, int status,
 }
 
 void sendJsonDocument(WebServer& server, JsonDocument& document) {
+  if (document.overflowed()) {
+    // Never publish a valid-looking partial list of coins after allocation
+    // failure; the browser can keep its last successful snapshot and retry.
+    // Release the failed document first. WebServer::send() allocates header
+    // nodes with throwing new, so using it here caused the captured panic.
+    document.clear();
+    static constexpr char BODY[] =
+        "{\"error\":\"Status memory unavailable; retry\"}";
+    NetworkClient& client = server.client();
+    writeResponseHeader(client, 503, F("application/json"), sizeof(BODY) - 1);
+    client.write(reinterpret_cast<const uint8_t*>(BODY), sizeof(BODY) - 1);
+    return;
+  }
   NetworkClient& client = server.client();
   writeResponseHeader(client, 200, F("application/json"),
                       measureJson(document));
   BufferedNetworkWriter writer(client);
   serializeJson(document, writer);
   writer.flushBuffer();
+}
+
+void addWatchdogTrace(JsonObject object, const HeliosWatchdogTrace& trace) {
+  object["uiStage"] = heliosUiStageText(trace.uiStage);
+  object["uiAtMs"] = trace.uiAtMs;
+  object["balanceStage"] = heliosBalanceStageText(trace.balanceStage);
+  object["balanceAtMs"] = trace.balanceAtMs;
+  if (trace.balanceCoin < HELIOS_COIN_COUNT) {
+    object["balanceCoin"] = heliosCoinProfileAt(trace.balanceCoin).symbol;
+  }
+}
+
+String addressHex(uint32_t address) {
+  return String("0x") + String(address, HEX);
+}
+
+void addSavedCrash(JsonDocument& document) {
+  document["schema"] = 1;
+  document["build"] = FIRMWARE_BUILD;
+  document["lastReset"] = resetReasonText();
+  document["runningElfSha256"] =
+      diagnosticHex(esp_app_get_description()->app_elf_sha256, 32);
+  document["available"] = false;
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH && CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF && defined(CONFIG_IDF_TARGET_ESP32)
+  size_t address = 0;
+  size_t size = 0;
+  esp_err_t result = esp_core_dump_image_get(&address, &size);
+  document["imageStatus"] = esp_err_to_name(result);
+  if (result != ESP_OK) return;
+  document["imageBytes"] = size;
+  // Never decode an incomplete/corrupt dump as a valid backtrace.
+  result = esp_core_dump_image_check();
+  document["integrityStatus"] = esp_err_to_name(result);
+  if (result != ESP_OK) return;
+  esp_core_dump_summary_t summary = {};
+  result = esp_core_dump_get_summary(&summary);
+  document["summaryStatus"] = esp_err_to_name(result);
+  if (result != ESP_OK) return;
+  summary.exc_task[sizeof(summary.exc_task) - 1] = '\0';
+  summary.app_elf_sha256[sizeof(summary.app_elf_sha256) - 1] = '\0';
+  document["available"] = true;
+  // These buffers live only until this helper returns. Own the JSON strings
+  // before sendJsonDocument serializes them in the caller.
+  document["crashedTask"] = String(summary.exc_task);
+  document["exceptionPC"] = addressHex(summary.exc_pc);
+  document["exceptionCause"] = summary.ex_info.exc_cause;
+  document["exceptionAddress"] = addressHex(summary.ex_info.exc_vaddr);
+  document["crashedElfSha256"] =
+      String(reinterpret_cast<const char*>(summary.app_elf_sha256));
+  document["backtraceCorrupted"] = summary.exc_bt_info.corrupted;
+  JsonArray backtrace = document["backtrace"].to<JsonArray>();
+  const size_t capacity = sizeof(summary.exc_bt_info.bt) / sizeof(summary.exc_bt_info.bt[0]);
+  const size_t depth = summary.exc_bt_info.depth < capacity
+                          ? summary.exc_bt_info.depth : capacity;
+  for (size_t i = 0; i < depth; ++i) {
+    backtrace.add(addressHex(summary.exc_bt_info.bt[i]));
+  }
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 5)
+  char reason[256] = {};
+  result = esp_core_dump_get_panic_reason(reason, sizeof(reason));
+  reason[sizeof(reason) - 1] = '\0';
+  document["reasonStatus"] = esp_err_to_name(result);
+  if (result == ESP_OK) document["panicReason"] = String(reason);
+#endif
+#else
+  document["imageStatus"] = "FLASH_ELF_CORE_DUMP_UNSUPPORTED";
+#endif
+  // Read-only: keep the saved dump intact for a matching-ELF investigation.
 }
 
 }  // namespace
@@ -143,15 +231,47 @@ void HeliosWeb::begin(HeliosSettings* settings, HeliosBalances* balances,
     NetworkClient& client = server_.client();
     writeResponseHeader(client, 200, F("text/html; charset=utf-8"),
                         HELIOS_WEB_PAGE_GZIP_SIZE, true);
-    client.write(HELIOS_WEB_PAGE_GZIP, HELIOS_WEB_PAGE_GZIP_SIZE);
+    for (size_t offset = 0; offset < HELIOS_WEB_PAGE_GZIP_SIZE;) {
+      const size_t remaining = HELIOS_WEB_PAGE_GZIP_SIZE - offset;
+      const size_t count = remaining > 1024U ? 1024U : remaining;
+      const size_t written = client.write(HELIOS_WEB_PAGE_GZIP + offset, count);
+      if (written == 0) break;
+      offset += written;
+      vTaskDelay(1);
+    }
   });
   server_.on("/api/status", HTTP_GET, [this]() { handleStatus(); });
+  server_.on("/api/diagnostics/crash", HTTP_GET, [this]() {
+    JsonDocument document;
+    addSavedCrash(document);
+    sendJsonDocument(server_, document);
+  });
+  server_.on("/api/diagnostics/watchdog", HTTP_GET, [this]() {
+    JsonDocument document;
+    document["build"] = FIRMWARE_BUILD;
+    document["sdk"] = ESP.getSdkVersion();
+    document["lastReset"] = resetReasonText();
+    document["deviceUptimeSeconds"] = millis() / 1000U;
+    document["freeHeap"] = ESP.getFreeHeap();
+    document["minFreeHeap"] = ESP.getMinFreeHeap();
+    document["largestFreeBlock"] = ESP.getMaxAllocHeap();
+    document["uiPriority"] = uxTaskPriorityGet(nullptr);
+    document["scheduling"] = "IDLE_PRIORITY_UI_1";
+    HeliosWatchdogTrace previous;
+    const bool previousAvailable = heliosPreviousWatchdogTrace(previous);
+    document["previousAvailable"] = previousAvailable;
+    if (previousAvailable) {
+      addWatchdogTrace(document["previous"].to<JsonObject>(), previous);
+    }
+    addWatchdogTrace(document["current"].to<JsonObject>(), heliosCurrentTrace());
+    sendJsonDocument(server_, document);
+  });
   server_.on("/api/diagnostics/sha-failure", HTTP_GET, [this]() {
     SoloHunterSha256Failure failure;
     JsonDocument document;
     const bool captured = soloHunterSha256GetFailure(failure);
     document["schema"] = 1;
-    document["driver"] = "REFERENCE_NATIVE_11";
+    document["driver"] = "PIPELINED_V2_R22";
     document["captured"] = captured;
     if (captured) {
       document["reason"] = failure.reason;
@@ -174,6 +294,60 @@ void HeliosWeb::begin(HeliosSettings* settings, HeliosBalances* balances,
     }
     sendJsonDocument(server_, document);
   });
+  server_.on("/api/diagnostics/mining", HTTP_GET, [this]() {
+    const SoloHunterMiningProfile p = soloHunterMinerGetProfile();
+    JsonDocument document;
+    document["build"] = FIRMWARE_BUILD;
+    document["uptimeSeconds"] = millis() / 1000U;
+    document["helperEnabled"] = p.helperEnabled;
+    document["epoch"] = p.epoch;
+    document["controlEpoch"] = p.controlEpoch;
+    document["ready"] = p.epoch == p.controlEpoch && p.elapsedUs > 0;
+    document["elapsedUs"] = p.elapsedUs;
+    document["hardwareCallUs"] = p.hardwareCallUs;
+    document["poolReadUs"] = p.poolReadUs;
+    document["poolReadMode"] = "CHUNKED_256";
+    document["poolReadCalls"] = p.poolReadCalls;
+    document["poolReadBytes"] = p.poolReadBytes;
+    document["poolMessages"] = p.poolMessages;
+    document["helperRunBudgetUs"] = p.helperRunBudgetUs;
+    document["candidateUs"] = p.candidateUs;
+    document["candidateVerifyUs"] = p.candidateVerifyUs;
+    document["hardwareCandidates"] = p.hardwareCandidates;
+    document["confirmedCandidates"] = p.confirmedCandidates;
+    document["stratumWriteMode"] = "BUFFERED_256";
+    document["shareSubmitUs"] = p.shareSubmitUs;
+    document["shareSubmitCalls"] = p.shareSubmitCalls;
+    document["shareSubmitFailures"] = p.shareSubmitFailures;
+    document["shareWriteCalls"] = p.shareWriteCalls;
+    document["shareBytes"] = p.shareBytes;
+    const uint64_t accounted = p.hardwareCallUs + p.poolReadUs + p.candidateUs;
+    document["otherUs"] = p.elapsedUs >= accounted ? p.elapsedUs - accounted : 0;
+    document["hardwareCalls"] = p.hardwareCalls;
+    document["hardwareHashes"] = p.hardwareHashes;
+    document["softwareHashes"] = p.softwareHashes;
+    document["helperHashes"] = p.helperHashes;
+    document["shaTiming"] = soloHunterSha256Timing();
+    sendJsonDocument(server_, document);
+  });
+  server_.on("/api/diagnostics/helper", HTTP_POST, [this]() {
+    const bool changeEnabled = server_.hasArg("enabled");
+    const bool changeBudget = server_.hasArg("runBudgetUs");
+    const String enabled = server_.arg("enabled");
+    const String budget = server_.arg("runBudgetUs");
+    if ((!changeEnabled && !changeBudget) ||
+        (changeEnabled && enabled != "0" && enabled != "1") ||
+        (changeBudget && budget != "20000" && budget != "40000")) {
+      sendError(400, "Use enabled=0/1 or runBudgetUs=20000/40000");
+      return;
+    }
+    if ((changeBudget && !soloHunterMinerSetHelperRunBudgetUs(budget.toInt())) ||
+        (changeEnabled && !soloHunterMinerSetHelperEnabled(enabled == "1"))) {
+      sendError(503, "Helper task unavailable");
+      return;
+    }
+    sendOk();
+  });
   server_.on("/api/diagnostics/balance-fetch", HTTP_POST, [this]() {
     String enabled = server_.arg("enabled");
     if (enabled != "0" && enabled != "1") {
@@ -186,6 +360,22 @@ void HeliosWeb::begin(HeliosSettings* settings, HeliosBalances* balances,
     }
     sendOk();
   });
+  server_.on("/api/coin-visibility", HTTP_POST, [this]() {
+    HeliosCoin coin;
+    const String visible = server_.arg("visible");
+    if (!server_.hasArg("coin") ||
+        !heliosCoinFromSymbol(server_.arg("coin"), coin) ||
+        (visible != "0" && visible != "1")) {
+      sendError(400, "Use a known coin and visible=0/1");
+      return;
+    }
+    if (!settings_->setCoinVisible(coin, visible == "1")) {
+      sendError(503, "Could not save device page setting");
+      return;
+    }
+    if (settingsCallback_) settingsCallback_();
+    sendOk();
+  });
   server_.on("/api/wallet", HTTP_POST, [this]() { handleWallet(); });
   server_.on("/api/mining", HTTP_POST, [this]() { handleMining(); });
   server_.on("/api/mining-settings", HTTP_POST, [this]() { handleMiningSettings(); });
@@ -194,7 +384,14 @@ void HeliosWeb::begin(HeliosSettings* settings, HeliosBalances* balances,
   server_.begin();
 }
 
-void HeliosWeb::loop() { server_.handleClient(); }
+void HeliosWeb::loop() {
+  HeliosNetworkMemoryGuard memory(0);
+  if (!memory) return;
+  // WebServer also uses throwing new while parsing a request. Defer before
+  // entering it when memory is scarce, rather than relying on a JSON check.
+  if (ESP.getFreeHeap() < 16384U || ESP.getMaxAllocHeap() < 4096U) return;
+  server_.handleClient();
+}
 
 void HeliosWeb::handleStatus() {
   const bool compact =
@@ -236,14 +433,23 @@ void HeliosWeb::handleStatus() {
   document["rearLedEnabled"] = cfg.rearLedEnabled;
   document["screenSleepSeconds"] = cfg.screenSleepSeconds;
   document["flipped"] = cfg.flipped;
-  document["currency"] = cfg.fiatCurrency == 1 ? "CAD" : cfg.fiatCurrency == 2 ? "GBP" : "USD";
+  document["currency"] = cfg.fiatCurrency == 1 ? "CAD" : cfg.fiatCurrency == 2 ? "GBP" : cfg.fiatCurrency == 3 ? "EUR" : "USD";
   if (!compact) {
+    document["helperMode"] = stats.auxiliaryMode;
+    document["helperSliceYields"] = stats.auxiliarySliceYields;
+    document["helperBalanceWaits"] = stats.auxiliaryBalanceWaits;
+    document["helperPartialBatches"] = stats.auxiliaryPartialBatches;
+    document["helperRunBudgetUs"] = stats.auxiliaryRunBudgetUs;
+    document["helperIdleTicks"] = stats.auxiliaryIdleTicks;
+    document["helperTaskPriority"] = stats.auxiliaryTaskPriority;
     document["freeHeap"] = ESP.getFreeHeap();
+    document["largestFreeBlock"] = ESP.getMaxAllocHeap();
+    document["uiScheduling"] = "IDLE_PRIORITY_UI_1";
     document["cpuMhz"] = getCpuFrequencyMhz();
     document["totalHashes"] = stats.totalHashes;
     document["submitted"] = stats.submittedShares;
     document["poolDifficulty"] = stats.poolDifficulty;
-    document["shaDriver"] = "REFERENCE_NATIVE_11";
+    document["shaDriver"] = "PIPELINED_V2_R22";
     document["shaChipRevision"] = soloHunterSha256ChipRevision();
     document["shaTiming"] = soloHunterSha256Timing();
     document["shaReferenceCheck"] = soloHunterSha256ReferenceValidation();
@@ -267,12 +473,15 @@ void HeliosWeb::handleStatus() {
     coin["symbol"] = profile.symbol;
     coin["name"] = profile.name;
     coin["wallet"] = cfg.wallets[i];
+    coin["showOnDevice"] = settings_->coinVisible(profile.id);
     coin["balanceAvailable"] = balance.available;
     coin["balance"] = balance.balance;
     coin["balanceStatus"] = balance.status;
     coin["pricesAvailable"] = balance.pricesAvailable;
+    coin["priceStatus"] = balance.priceStatus;
     coin["value"] = balance.balance *
         (cfg.fiatCurrency == 1 ? balance.priceCad
+         : cfg.fiatCurrency == 3 ? balance.priceEur
          : cfg.fiatCurrency == 2 ? balance.priceGbp
                                  : balance.priceUsd);
     if (!compact) {
@@ -280,9 +489,11 @@ void HeliosWeb::handleStatus() {
       coin["priceUsd"] = balance.priceUsd;
       coin["priceCad"] = balance.priceCad;
       coin["priceGbp"] = balance.priceGbp;
+      coin["priceEur"] = balance.priceEur;
       coin["valueUsd"] = balance.balance * balance.priceUsd;
       coin["valueCad"] = balance.balance * balance.priceCad;
       coin["valueGbp"] = balance.balance * balance.priceGbp;
+      coin["valueEur"] = balance.balance * balance.priceEur;
     }
   }
   sendJsonDocument(server_, document);
@@ -331,7 +542,7 @@ void HeliosWeb::handleDevice() {
   if (server_.hasArg("flipped")) settings_->setFlipped(server_.arg("flipped") == "1");
   if (server_.hasArg("currency")) {
     String currency = server_.arg("currency");
-    settings_->setFiatCurrency(currency == "CAD" ? 1 : currency == "GBP" ? 2 : 0);
+    settings_->setFiatCurrency(currency == "CAD" ? 1 : currency == "GBP" ? 2 : currency == "EUR" ? 3 : 0);
   }
   sendOk();
 }

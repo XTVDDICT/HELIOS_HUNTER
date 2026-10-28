@@ -11,6 +11,7 @@
 #include <mbedtls/sha256.h>
 #include <esp_chip_info.h>
 #include <atomic>
+#include <stddef.h>
 
 // Match ESP-IDF's DPORT read workaround, protecting only the two bus reads,
 // never the mining batch. a8 is the result; psReg must be a spare register.
@@ -40,6 +41,20 @@
       "j        16f\n" \
       "91:\n"
 
+struct PipelinedV2Context {
+  uint32_t header[20];
+  uint32_t nonce;
+  uint32_t budget;
+  uint32_t run;
+  uint32_t pad;
+  uint32_t checksum;
+};
+
+extern "C" uint32_t pipelined_hw_mine_classic_v2(
+    volatile uint32_t*, PipelinedV2Context*);
+extern "C" uint32_t pipelined_hw_mine_classic_v2_margin(
+    volatile uint32_t*, PipelinedV2Context*);
+
 namespace {
 
 bool hardwareLocked = false;
@@ -57,6 +72,18 @@ SoloHunterSha256Failure firstFailure;
 std::atomic<bool> failureCaptured{false};
 constexpr uint32_t SHA_IDLE_SPIN_LIMIT = 4096;
 constexpr uint8_t FAST_SELF_TEST_ATTEMPTS = 3;
+constexpr uint32_t CANDIDATE_HEALTH_WINDOW = 256;
+constexpr uint32_t CANDIDATE_FAILURE_LIMIT = 8;
+
+enum class FastPipeline : uint8_t {
+  Legacy,
+  PipelinedV2Fast,
+  PipelinedV2Margin,
+};
+
+std::atomic<FastPipeline> fastPipeline{FastPipeline::Legacy};
+std::atomic<uint32_t> candidateHealthHits{0};
+std::atomic<uint32_t> candidateHealthFailures{0};
 
 struct PipelineArgs {
   volatile uint32_t* shaBase;
@@ -69,6 +96,23 @@ struct PipelineArgs {
 };
 
 static_assert(sizeof(PipelineArgs) == 28, "ESP32 pipeline arguments changed");
+
+static_assert(offsetof(PipelinedV2Context, nonce) == 80,
+              "Pipelined-v2 nonce offset changed");
+static_assert(offsetof(PipelinedV2Context, budget) == 84,
+              "Pipelined-v2 budget offset changed");
+static_assert(offsetof(PipelinedV2Context, run) == 88,
+              "Pipelined-v2 run offset changed");
+static_assert(offsetof(PipelinedV2Context, pad) == 92,
+              "Pipelined-v2 pad offset changed");
+static_assert(sizeof(PipelinedV2Context) == 100,
+              "Pipelined-v2 context size changed");
+
+using PipelinedV2Function =
+    uint32_t (*)(volatile uint32_t*, PipelinedV2Context*);
+
+bool softwareReferenceSha256(const uint8_t* input, size_t length,
+                             uint8_t output[32]);
 
 void resetShaPeripheral() {
   // AES/TLS shares these clock/reset registers. Use the same RCC lock as
@@ -631,11 +675,76 @@ __attribute__((noinline)) IRAM_ATTR void runTimedPipeline(PipelineArgs& args) {
         "a11", "a12", "a13", "a14", "memory");
 }
 
+PipelinedV2Function selectedPipelinedV2Function() {
+  switch (fastPipeline.load()) {
+    case FastPipeline::PipelinedV2Fast:
+      return pipelined_hw_mine_classic_v2;
+    case FastPipeline::PipelinedV2Margin:
+      return pipelined_hw_mine_classic_v2_margin;
+    default:
+      return nullptr;
+  }
+}
+
+bool computeReferenceDoubleHash(const uint32_t headerSwapped[20],
+                                uint32_t nonce, uint8_t output[32]) {
+  uint8_t header[80];
+  for (size_t i = 0; i < 20; ++i) {
+    const uint32_t nativeWord = __builtin_bswap32(headerSwapped[i]);
+    memcpy(header + i * sizeof(nativeWord), &nativeWord,
+           sizeof(nativeWord));
+  }
+  for (size_t i = 0; i < 4; ++i) {
+    header[76 + i] = static_cast<uint8_t>(nonce >> (i * 8));
+  }
+  uint8_t first[32];
+  return softwareReferenceSha256(header, sizeof(header), first) &&
+         softwareReferenceSha256(first, sizeof(first), output);
+}
+
+bool runPipelinedV2Locked(const uint32_t headerSwapped[20],
+                          uint32_t& nextNonceSwapped, uint32_t maxHashes,
+                          SoloHunterSha256Result& result,
+                          bool readFinalDigest) {
+  PipelinedV2Function function = selectedPipelinedV2Function();
+  if (function == nullptr) return false;
+
+  PipelinedV2Context context = {};
+  memcpy(context.header, headerSwapped, sizeof(context.header));
+  context.nonce = nextNonceSwapped;
+  context.budget = maxHashes;
+  context.run = 1;
+  context.pad = 0x80000000U;
+
+  const uint32_t candidate =
+      function(reinterpret_cast<volatile uint32_t*>(SHA_TEXT_BASE), &context);
+  nextNonceSwapped = context.nonce;
+  result.hashes = maxHashes - context.budget;
+  result.candidate = candidate != 0;
+  result.candidateConfirmed = true;
+
+  if ((result.candidate || readFinalDigest) && result.hashes != 0) {
+    result.nonce = __builtin_bswap32(nextNonceSwapped - 1);
+    if (!computeReferenceDoubleHash(headerSwapped, result.nonce,
+                                    result.hash)) {
+      return false;
+    }
+    if (result.candidate) {
+      result.candidateConfirmed =
+          result.hash[30] == 0 && result.hash[31] == 0;
+    }
+  }
+  return result.hashes != 0;
+}
+
 bool mineLocked(const uint32_t headerSwapped[20],
                 uint32_t& nextNonceSwapped, uint16_t leadingZeroMask,
                 uint32_t maxHashes, SoloHunterSha256Result& result,
                 bool readFinalDigest = false) {
   if (maxHashes == 0) return false;
+  result.candidate = false;
+  result.candidateConfirmed = true;
+  result.hashes = 0;
 
   PipelineArgs args;
   args.shaBase = reinterpret_cast<volatile uint32_t*>(SHA_TEXT_BASE);
@@ -648,6 +757,14 @@ bool mineLocked(const uint32_t headerSwapped[20],
   const uint32_t startingNonce = args.nonce;
 
   if (!prepareShaPeripheral()) return false;
+  // The measured v2 loop uses a fixed 16-bit filter. Pools with an unusually
+  // easy target retain the legacy variable-mask loop so no valid share can be
+  // skipped.
+  if (timedPipeline && leadingZeroMask == 0xFFFFU &&
+      selectedPipelinedV2Function() != nullptr) {
+    return runPipelinedV2Locked(headerSwapped, nextNonceSwapped, maxHashes,
+                                result, readFinalDigest);
+  }
   if (timedPipeline) {
     // The timed loop compares directly against an exclusive end nonce. This
     // removes both a counter increment and a countdown instruction per hash.
@@ -856,6 +973,48 @@ bool hardwareSelfTest() {
   return true;
 }
 
+bool pipelinedV2KnownAnswerSelfTest() {
+  PipelinedV2Function function = selectedPipelinedV2Function();
+  if (function == nullptr) return true;
+
+  // For this deterministic header these are the only low-16-bit candidates
+  // in the 262,144-nonce test range. Detecting an extra candidate or missing
+  // one catches timing errors that a handful of full-digest checks can miss.
+  static const uint32_t expected[] = {
+      0xA94CU, 0xE496U, 0x1F476U, 0x302F0U, 0x35AF9U, 0x3CF5CU};
+  constexpr uint32_t first = 0x1000U;
+  PipelinedV2Context context = {};
+  for (uint32_t i = 0; i < 19; ++i) {
+    context.header[i] = 0x9E3779B9U * (i + 1);
+  }
+  context.nonce = first;
+  context.budget = 262144U;
+  context.run = 1;
+  context.pad = 0x80000000U;
+
+  resetShaPeripheral();
+  size_t found = 0;
+  while (context.budget != 0 &&
+         function(reinterpret_cast<volatile uint32_t*>(SHA_TEXT_BASE),
+                  &context) != 0) {
+    if (found >= sizeof(expected) / sizeof(expected[0]) ||
+        context.nonce - 1U - first != expected[found]) {
+      lastSelfTestFailure.store("PIPELINED V2 KAT");
+      return false;
+    }
+    ++found;
+  }
+  const bool passed =
+      found == sizeof(expected) / sizeof(expected[0]) &&
+      context.budget == 0;
+  if (!passed) lastSelfTestFailure.store("PIPELINED V2 KAT");
+  return passed;
+}
+
+bool currentPipelineSelfTest() {
+  return pipelinedV2KnownAnswerSelfTest() && hardwareSelfTest();
+}
+
 void recordFallback(const char* reason) {
   lastFault.store(reason);
   lastFallback.store(reason);
@@ -864,7 +1023,7 @@ void recordFallback(const char* reason) {
 bool revalidateCurrentPipeline() {
   for (uint8_t attempt = 0; attempt < FAST_SELF_TEST_ATTEMPTS; ++attempt) {
     resetShaPeripheral();
-    if (hardwareSelfTest()) {
+    if (currentPipelineSelfTest()) {
       lastSelfTestFailure.store("NONE");
       return true;
     }
@@ -876,18 +1035,34 @@ bool revalidateCurrentPipeline() {
 }
 
 bool selectValidatedFastPipeline() {
-  referenceNativePipeline.store(nativeDportReads.load());
-  if (referenceNativePipeline.load()) {
+  referenceNativePipeline.store(false);
+  if (nativeDportReads.load()) {
+    fastPipeline.store(FastPipeline::PipelinedV2Fast);
     if (revalidateCurrentPipeline()) {
-      referenceValidation.store("PASSED");
+      referenceValidation.store("PIPELINED V2 FAST");
       return true;
     }
-    referenceValidation.store(lastSelfTestFailure.load());
+
+    fastPipeline.store(FastPipeline::PipelinedV2Margin);
+    if (revalidateCurrentPipeline()) {
+      referenceValidation.store("PIPELINED V2 MARGIN");
+      return true;
+    }
+
+    // Preserve the exact 920 kH/s loop as the first non-v2 fallback.
+    fastPipeline.store(FastPipeline::Legacy);
+    referenceNativePipeline.store(true);
+    if (revalidateCurrentPipeline()) {
+      referenceValidation.store("LEGACY REFERENCE");
+      return true;
+    }
     referenceNativePipeline.store(false);
-  } else {
-    referenceValidation.store("NOT ELIGIBLE");
   }
-  // A failed reference test retains the known FAST loop, not SAFE mode.
+
+  fastPipeline.store(FastPipeline::Legacy);
+  referenceValidation.store(nativeDportReads.load()
+                                ? "LEGACY NATIVE"
+                                : "LEGACY GUARDED");
   return revalidateCurrentPipeline();
 }
 
@@ -913,7 +1088,10 @@ bool soloHunterSha256Begin() {
   nativeDportReads.store(timedPipeline && chip.model == CHIP_ESP32 &&
                         chip.revision >= 300 && !nativeReadsRejected);
   if (!timedPipeline) recordFallback("CLOCKS NOT 240/80 MHZ");
+  fastPipeline.store(FastPipeline::Legacy);
   referenceNativePipeline.store(false);
+  candidateHealthHits.store(0);
+  candidateHealthFailures.store(0);
   const bool ok = timedPipeline ? selectValidatedFastPipeline()
                                 : hardwareSelfTest();
   if (ok) {
@@ -951,12 +1129,10 @@ bool soloHunterSha256Recover() {
   // invalid, release hardware temporarily; the miner retries FAST later.
   bool ok = timedPipeline ? revalidateCurrentPipeline()
                           : (resetShaPeripheral(), hardwareSelfTest());
-  if (!ok && referenceNativePipeline.load()) {
-    referenceValidation.store(lastSelfTestFailure.load());
-    referenceNativePipeline.store(false);
-    ok = revalidateCurrentPipeline();
-  }
+  if (!ok && timedPipeline) ok = selectValidatedFastPipeline();
   if (ok) {
+    candidateHealthHits.store(0);
+    candidateHealthFailures.store(0);
     lastFallback.store("NONE");
     return true;
   }
@@ -966,6 +1142,22 @@ bool soloHunterSha256Recover() {
   hardwareLocked = false;
   unlockShaHardware();
   return false;
+}
+
+bool soloHunterSha256RecordCandidateValidation(bool confirmed) {
+  if (!hardwareLocked) return false;
+  const uint32_t failures =
+      confirmed ? candidateHealthFailures.load()
+                : candidateHealthFailures.fetch_add(1) + 1;
+  const uint32_t hits = candidateHealthHits.fetch_add(1) + 1;
+  if (hits < CANDIDATE_HEALTH_WINDOW) return false;
+
+  candidateHealthHits.store(0);
+  candidateHealthFailures.store(0);
+  if (failures < CANDIDATE_FAILURE_LIMIT) return false;
+
+  lastFault.store("PERSISTENT CANDIDATE MISMATCH");
+  return true;
 }
 
 const char* soloHunterSha256LastFault() {
@@ -983,6 +1175,12 @@ const char* soloHunterSha256LastSelfTestFailure() {
 const char* soloHunterSha256Timing() {
   if (!hardwareLocked) return "SOFTWARE";
   if (!timedPipeline) return "POLLING";
+  if (fastPipeline.load() == FastPipeline::PipelinedV2Fast) {
+    return "PIPELINED_V2_247";
+  }
+  if (fastPipeline.load() == FastPipeline::PipelinedV2Margin) {
+    return "PIPELINED_V2_257";
+  }
   if (!nativeDportReads.load()) return "GUARDED_DPORT";
   return referenceNativePipeline.load() ? "REFERENCE_NATIVE_DPORT"
                                         : "NATIVE_DPORT";
@@ -1023,6 +1221,10 @@ bool soloHunterSha256FastPathActive() {
 }
 
 bool soloHunterSha256Recover() {
+  return false;
+}
+
+bool soloHunterSha256RecordCandidateValidation(bool) {
   return false;
 }
 

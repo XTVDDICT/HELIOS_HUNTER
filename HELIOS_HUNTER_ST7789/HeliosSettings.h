@@ -6,6 +6,7 @@
 
 struct HeliosSettingsData {
   String wallets[HELIOS_COIN_COUNT];
+  uint16_t visibleCoins = (1U << HELIOS_COIN_COUNT) - 1U;
   String miningPoolHost = "chta.heliospool.com";
   uint16_t miningPoolPort = 3336;
   String miningUsername;
@@ -24,6 +25,8 @@ class HeliosSettings {
   void begin();
   const HeliosSettingsData& data() const;
   String wallet(HeliosCoin coin) const;
+  bool coinVisible(HeliosCoin coin) const;
+  bool setCoinVisible(HeliosCoin coin, bool visible);
   void setWallet(HeliosCoin coin, String value);
   void setMining(String host, uint16_t port, String username, String worker,
                  String password, bool enabled);

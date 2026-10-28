@@ -17,11 +17,13 @@ struct HeliosBalanceSnapshot {
   double priceUsd = 0.0;
   double priceCad = 0.0;
   double priceGbp = 0.0;
+  double priceEur = 0.0;
   uint32_t pricesUpdatedAt = 0;
   double increaseAmount = 0.0;
   uint32_t increaseSequence = 0;
   uint32_t updatedAt = 0;
   String status = "WAITING";
+  String priceStatus = "WAITING";
 };
 
 struct HeliosBalanceFetchState {
@@ -47,10 +49,10 @@ class HeliosBalances {
   void taskLoop();
   void processAcknowledgements();
   void syncWallets();
-  void refreshCoin(HeliosCoin coin, const String& wallet);
+  void refreshCoin(HeliosCoin coin, const String& wallet, bool pricesOnly = false);
   bool fetchBalance(HeliosCoin coin, const String& wallet, double& balance,
                     String& error);
-  bool fetchPrices(HeliosCoin coin, double& usd, double& cad, double& gbp,
+  bool fetchPrices(HeliosCoin coin, double& usd, double& cad, double& gbp, double& eur,
                    String& error);
 
   HeliosSettings* settings_ = nullptr;
@@ -58,9 +60,11 @@ class HeliosBalances {
   TaskHandle_t task_ = nullptr;
   String wallets_[HELIOS_COIN_COUNT];
   HeliosBalanceSnapshot snapshots_[HELIOS_COIN_COUNT];
-  uint8_t pendingMask_ = 0;
-  uint8_t pendingAcknowledgementMask_ = 0;
+  uint16_t pendingMask_ = 0;
+  uint16_t priorityMask_ = 0;
+  uint16_t pendingAcknowledgementMask_ = 0;
   String acknowledgedWallets_[HELIOS_COIN_COUNT];
+  uint32_t lastPriceAttemptAt_[HELIOS_COIN_COUNT] = {};
   uint32_t lastSweepAt_ = 0;
   uint32_t increaseSequence_ = 0;
   bool fetchEnabled_ = true;

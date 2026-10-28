@@ -6,14 +6,11 @@ namespace {
 
 constexpr const char* NAMESPACE_NAME = "helioshunter";
 constexpr const char* WALLET_KEYS[HELIOS_COIN_COUNT] = {
-    "w_chta", "w_wjk", "w_dgb", "w_bch", "w_btc", "w_fix", "w_xec",
-    "w_zec"};
+    "w_chta", "w_wjk", "w_dgb", "w_bch", "w_btc", "w_fix", "w_xec", "w_zec", "w_grlc"};
 constexpr const char* LEGACY_POOL_HOST_KEYS[HELIOS_COIN_COUNT] = {
-    "ph_chta", "ph_wjk", "ph_dgb", "ph_bch", "ph_btc", "ph_fix",
-    "ph_xec", "ph_zec"};
+    "ph_chta", "ph_wjk", "ph_dgb", "ph_bch", "ph_btc", "ph_fix", "ph_xec", "ph_zec", "ph_grlc"};
 constexpr const char* LEGACY_POOL_PORT_KEYS[HELIOS_COIN_COUNT] = {
-    "pp_chta", "pp_wjk", "pp_dgb", "pp_bch", "pp_btc", "pp_fix",
-    "pp_xec", "pp_zec"};
+    "pp_chta", "pp_wjk", "pp_dgb", "pp_bch", "pp_btc", "pp_fix", "pp_xec", "pp_zec", "pp_grlc"};
 
 String cleaned(String value, size_t maximumLength) {
   value.trim();
@@ -40,6 +37,7 @@ uint16_t cleanedSleepSeconds(uint16_t seconds) {
 void HeliosSettings::begin() {
   Preferences prefs;
   prefs.begin(NAMESPACE_NAME, true);
+  data_.visibleCoins = prefs.getUShort("viscoins", (1U << HELIOS_COIN_COUNT) - 1U);
   for (size_t i = 0; i < HELIOS_COIN_COUNT; ++i) {
     data_.wallets[i] = prefs.getString(WALLET_KEYS[i], "");
   }
@@ -65,7 +63,7 @@ void HeliosSettings::begin() {
   data_.fiatCurrency = prefs.getUChar("currency", 0);
   data_.screenSleepSeconds =
       cleanedSleepSeconds(prefs.getUShort("sleeptime", 0));
-  if (data_.fiatCurrency > 2) data_.fiatCurrency = 0;
+  if (data_.fiatCurrency > 3) data_.fiatCurrency = 0;
   prefs.end();
 }
 
@@ -73,6 +71,23 @@ const HeliosSettingsData& HeliosSettings::data() const { return data_; }
 
 String HeliosSettings::wallet(HeliosCoin coin) const {
   return data_.wallets[heliosCoinIndex(coin)];
+}
+
+bool HeliosSettings::coinVisible(HeliosCoin coin) const {
+  return (data_.visibleCoins & (1U << heliosCoinIndex(coin))) != 0;
+}
+
+bool HeliosSettings::setCoinVisible(HeliosCoin coin, bool visible) {
+  const uint16_t bit = 1U << heliosCoinIndex(coin);
+  const uint16_t updated = visible ? data_.visibleCoins | bit
+                                   : data_.visibleCoins & ~bit;
+  if (updated == data_.visibleCoins) return true;
+  Preferences prefs;
+  if (!prefs.begin(NAMESPACE_NAME, false)) return false;
+  const bool saved = prefs.putUShort("viscoins", updated) == sizeof(uint16_t);
+  prefs.end();
+  if (saved) data_.visibleCoins = updated;
+  return saved;
 }
 
 void HeliosSettings::saveText(const char* key, const String& value) {
@@ -146,7 +161,7 @@ void HeliosSettings::setBrightness(uint8_t brightness) {
 }
 
 void HeliosSettings::setFiatCurrency(uint8_t currency) {
-  data_.fiatCurrency = currency <= 2 ? currency : 0;
+  data_.fiatCurrency = currency <= 3 ? currency : 0;
   Preferences prefs;
   prefs.begin(NAMESPACE_NAME, false);
   prefs.putUChar("currency", data_.fiatCurrency);
