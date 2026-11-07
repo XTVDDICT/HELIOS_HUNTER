@@ -52,20 +52,24 @@ class HeliosLgfx : public lgfx::LGFX_Device {
     {
       auto cfg = panel_.config();
       cfg.pin_cs = 15;
-      cfg.pin_rst = -1;
+      cfg.pin_rst = 12;   // CYD 2USB wires panel reset to GPIO12
       cfg.pin_busy = -1;
       cfg.memory_width = 240;
       cfg.memory_height = 320;
-      cfg.panel_width = 240;
-      cfg.panel_height = 320;
+      // Declare the panel in the orientation it is physically mounted.
+      cfg.panel_width = 320;
+      cfg.panel_height = 240;
       cfg.offset_x = 0;
-      cfg.offset_y = 0;
+      // Rotations 4..6 make Panel_LCD::setRotation() compute
+      // _rowstart = memory_height - (panel_height + offset_y) = 320 - 240 = 80,
+      // which shifts the image down and crops the bottom. Cancel it here.
+      cfg.offset_y = 80;
       cfg.offset_rotation = 0;
       cfg.dummy_read_pixel = 8;
       cfg.dummy_read_bits = 1;
       cfg.readable = true;
       cfg.invert = false;
-      cfg.rgb_order = false;
+      cfg.rgb_order = true;   // this glass is BGR
       cfg.dlen_16bit = false;
       cfg.bus_shared = false;
       panel_.config(cfg);
@@ -85,9 +89,13 @@ class HeliosLgfx : public lgfx::LGFX_Device {
       cfg.x_max = 3900;
       cfg.y_min = 3700;
       cfg.y_max = 200;
-      cfg.pin_int = -1;
+      cfg.pin_int = 36;   // touch IRQ on this board
       cfg.bus_shared = false;
-      cfg.offset_rotation = 0;
+      // XPT2046 X/Y are crossed vs. the panel. Odd offset_rotation swaps the
+      // axes in Panel_Device::convertRawXY(); bit 1 flips X. With display
+      // rotation 4 this yields r = 3, the same frame LovyanGFX uses for
+      // _detector_Sunton_ESP32_2432S028_t.
+      cfg.offset_rotation = 7;
       cfg.spi_host = -1;
       cfg.freq = 1000000;
       cfg.pin_sclk = 25;
@@ -174,7 +182,8 @@ void HeliosDisplay::begin(HeliosSettings* settings, HeliosBalances* balances) {
   balances_ = balances;
   display.init();
   display.setColorDepth(16);
-  display.setRotation(settings_->data().flipped ? 3 : 1);
+  // 4 = landscape mirrored (0..3 normal, 4..7 mirrored); 6 = its flipped counterpart.
+  display.setRotation(settings_->data().flipped ? 6 : 4);
   display.setBrightness(settings_->data().brightness);
   appliedFlipped_ = settings_->data().flipped;
   appliedBrightness_ = settings_->data().brightness;
@@ -214,7 +223,7 @@ void HeliosDisplay::loop() {
   }
   if (cfg.flipped != appliedFlipped_) {
     appliedFlipped_ = cfg.flipped;
-    display.setRotation(appliedFlipped_ ? 3 : 1);
+    display.setRotation(appliedFlipped_ ? 6 : 4);
     redrawRequested_ = true;
   }
   uint32_t now = millis();
