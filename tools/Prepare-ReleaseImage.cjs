@@ -85,7 +85,7 @@ function prepare(original, requireBuild = true) {
   assert(isBlank(original, images[1].end, apps[0].offset + apps[0].size),
     'Application has extra/signature data');
   if (requireBuild) {
-    assert(original.includes(Buffer.from('R23_GRLC_BALANCE_MINING_20261028')),
+    assert(original.includes(Buffer.from('V1.0.12_DEVICE_WIFI_20261119')),
       'Not the R23 GRLC balance/mining build');
   }
   const output = Buffer.from(original);

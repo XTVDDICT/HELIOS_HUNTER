@@ -13,6 +13,8 @@ struct SoloHunterMiningConfig {
 
 struct SoloHunterMiningStats {
   float hashrateKh = 0.0f;
+  float peakHashrateKh = 0.0f;
+  double averageHashrateKh = 0.0;
   float primaryHashrateKh = 0.0f;
   float auxiliaryHashrateKh = 0.0f;
   const char* auxiliaryMode = "WAITING";

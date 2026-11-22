@@ -61,6 +61,7 @@ void HeliosSettings::begin() {
   data_.rearLedEnabled = prefs.getBool("rearled", true);
   data_.brightness = prefs.getUChar("bright", 220);
   data_.fiatCurrency = prefs.getUChar("currency", 0);
+  data_.displayOptions.load(prefs);
   data_.screenSleepSeconds =
       cleanedSleepSeconds(prefs.getUShort("sleeptime", 0));
   if (data_.fiatCurrency > 3) data_.fiatCurrency = 0;
@@ -165,6 +166,14 @@ void HeliosSettings::setFiatCurrency(uint8_t currency) {
   Preferences prefs;
   prefs.begin(NAMESPACE_NAME, false);
   prefs.putUChar("currency", data_.fiatCurrency);
+  prefs.end();
+}
+
+void HeliosSettings::setDisplayOptions(const HunterDisplayOptions& options) {
+  data_.displayOptions = options;
+  Preferences prefs;
+  prefs.begin(NAMESPACE_NAME, false);
+  data_.displayOptions.save(prefs);
   prefs.end();
 }
 

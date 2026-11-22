@@ -2,7 +2,7 @@
 
 ![HeliosPool logo](assets/heliospool-main.png)
 
-HELIOS_HUNTER is multi-coin mining firmware for the ESP32 Cheap Yellow Display. It combines an independent SHA-256d Stratum miner with balance pages for Cheetahcoin, WojakCoin, FixedCoin, DigiByte, eCash, Zcash, Bitcoin Cash, and Bitcoin.
+HELIOS_HUNTER is multi-coin mining firmware for the ESP32 Cheap Yellow Display. It combines an independent SHA-256d Stratum miner with balance pages for Cheetahcoin, WojakCoin, Garlicoin, FixedCoin, DigiByte, eCash, Zcash, Bitcoin Cash, and Bitcoin.
 
 ## Independent Project
 
@@ -12,27 +12,22 @@ For support, I can be reached in the `SOLO_HUNTER` channel of the HeliosPool Dis
 
 Two display versions are available:
 
-- `HELIOS_HUNTER_ILI9341_v1.0.11_merged.bin` for ILI9341 panels
-- `HELIOS_HUNTER_ST7789_v1.0.11_merged.bin` for ST7789 panels
+- `HELIOS_HUNTER_ILI9341_v1.0.12_merged.bin` for ILI9341 panels
+- `HELIOS_HUNTER_ST7789_v1.0.12_merged.bin` for ST7789 panels
 
 Use only the firmware version that matches the display controller in your CYD.
 
-## What's New in v1.0.11
+## What's New in v1.0.12
 
-- Added Garlicoin (GRLC) balances, logo, fiat prices, matching LED color and
-  balance-increase alerts between WJK and FIX.
-- Added a saved "Show on device" checkbox on every coin's web tab. Hidden
-  pages are skipped in both directions; Home always remains available.
-- Improved balance scheduling, price caching/fallbacks, TLS timeouts and memory
-  use, including native flash-pixel logo drawing.
-- Improved software-helper scheduling and buffered pool communication, with
-  additional mining and reset diagnostics.
-- Updated the pipelined hardware SHA engine with validated fallbacks.
-- Added EUR alongside USD/CAD/GBP and kept all hashrates in kH/s.
+- Added Wi-Fi network name/password controls to the Device page, with an explicit open-network option.
+- Try new Wi-Fi credentials before saving them. Failed connection attempts restore the previous network after 30 seconds.
+- Open HELIOS_HUNTER_SETUP after 10 failed saved-network attempts. Power cycling starts a new set of attempts.
+- Compacted Device settings into display/lighting and Wi-Fi cards, arranged side by side on desktop and stacked on phones.
+- Added optional night schedules with start/end times and named timezones. Scheduled sleep turns off the backlight and rear LEDs while mining continues.
+- Improved touch wake and block-alert handling. Optional 30-second alert auto-clear defaults to off.
+- Added session uptime, average/peak hashrate in kH/s, and rejected-share percentage to the web dashboard.
 
-GRLC and ZEC are balance tracking only. The miner uses SHA-256d. Actual
-hashrate depends on hardware and runtime conditions; this release does not
-promise a particular speed or zero watchdog resets.
+GRLC and ZEC provide balance tracking. Mining uses SHA-256d, with hashrates displayed in kH/s.
 
 ## Features
 
@@ -61,53 +56,49 @@ HELIOS_HUNTER is designed for the:
 
 ## New Installation
 
-Use this method for a new device, recovery, switching from unrelated firmware,
-or whenever the existing partition layout is unknown. Arduino IDE is **not
-required**.
+Download the matching firmware from the [latest GitHub release](https://github.com/XTVDDICT/HELIOS_HUNTER/releases/latest). Use an ESP32 flasher that lets you select a file and flash address.
 
-Download the merged `.bin` file that matches your display from the [latest GitHub release](https://github.com/XTVDDICT/HELIOS_HUNTER/releases/latest):
+| Screen controller | Fresh-install file | Flash address |
+| --- | --- | --- |
+| ILI9341 | `HELIOS_HUNTER_ILI9341_v1.0.12_merged.bin` | `0x0` |
+| ST7789 | `HELIOS_HUNTER_ST7789_v1.0.12_merged.bin` | `0x0` |
 
-- `HELIOS_HUNTER_ILI9341_v1.0.11_merged.bin`
-- `HELIOS_HUNTER_ST7789_v1.0.11_merged.bin`
+1. Connect the CYD using a USB data cable and select its COM/serial port in the flasher.
+2. Choose the matching `_merged.bin` and enter address **`0x0`**.
+3. If the flasher asks, use **ESP32**, **4 MB flash**, **QIO**, **80 MHz**, and **921600 baud**. Try **115200 baud** if transfer fails.
+4. Flash the image, then restart the device. If it will not enter download mode, hold BOOT, tap RESET, and release BOOT when the flasher connects.
+5. Connect your phone or computer to **HELIOS_HUNTER_SETUP**. Open **http://192.168.4.1** if the setup page does not appear automatically, then enter your 2.4 GHz Wi-Fi credentials.
+6. Open the IP address shown on the device. Configure the Mining tab and each coin's balance address.
 
-Use an ESP32-compatible flashing tool and connect the CYD to your computer with USB.
-
-1. Select the merged file matching the CYD's ILI9341 or ST7789 screen.
-2. Flash it at `0x0000`.
-3. Restart the device and complete `HELIOS_HUNTER_SETUP` when prompted.
-
-The merged image contains the bootloader, partition table, boot application
-data, and HELIOS_HUNTER application. Do not assign additional offsets or flash
-the app-only update file during a new installation.
+Use this fresh-install method for a new device, recovery, switching from other firmware, or an unknown partition layout. The merged image includes the bootloader, partition table, and application. A fresh install resets saved settings. Arduino IDE is unnecessary for installing these release files.
 
 ## Update Without Losing Settings
 
-Use this method only on a device already running HELIOS_HUNTER with the Huge APP
-partition layout.
+Use the update image on a device already running HELIOS_HUNTER with the **Huge APP (3MB No OTA/1MB SPIFFS)** partition layout.
 
-Download the update file matching the device's screen:
+| Screen controller | Settings-preserving update file | Flash address |
+| --- | --- | --- |
+| ILI9341 | `HELIOS_HUNTER_ILI9341_v1.0.12_update.bin` | `0x10000` |
+| ST7789 | `HELIOS_HUNTER_ST7789_v1.0.12_update.bin` | `0x10000` |
 
-- `HELIOS_HUNTER_ILI9341_v1.0.11_update.bin`
-- `HELIOS_HUNTER_ST7789_v1.0.11_update.bin`
-
-1. In the ESP32 flasher, select only the matching `_update.bin` file.
-2. Set its flash address to `0x10000` (four zeros after the 1, **not `0x1000`**).
-3. Set **Erase Flash** to **No Erase**, or disable full-chip erase.
+1. Connect the device, select its COM/serial port, and choose **only** the matching `_update.bin`.
+2. Set the flash address to **`0x10000`**, with four zeros after the 1.
+3. Disable **Erase All Flash**, **Full-chip erase**, or the equivalent option. Select **No Erase** if available. The flasher still erases the application sectors it writes.
 4. Flash the update and restart the device.
 
-The update image replaces only the application. It leaves the NVS settings at
-`0x9000` untouched, preserving Wi-Fi, mining, wallet, currency, brightness,
-LED, sleep, rotation, and coin-page visibility settings. Do not use this method if the flasher cannot
-select `0x10000` and disable erase.
+This replaces the application and preserves the NVS settings at `0x9000`, including saved Wi-Fi, mining configuration, wallets, currency, brightness, rotation, LED/sleep settings, and coin-page visibility. New night-mode and alert auto-clear settings default to off.
 
-### Important
+**`0x1000` is the wrong address for an application update.** Use `0x10000` for `_update.bin`. A merged image belongs at `0x0` and can clear your configuration. If the flasher cannot select an address and disable full-chip erase, choose a flasher that supports both options.
 
-Always use the firmware matching the display controller:
+Always match the firmware to the screen controller. A mismatched display version can show a black or distorted screen.
 
-- ILI9341 display → use the ILI9341 firmware
-- ST7789 display → use the ST7789 firmware
+## Changing Wi-Fi or Moving the Miner
 
-Flashing the wrong display version may result in a blank, distorted, incorrectly colored, or unusable screen.
+While connected, open **Device > Wi-Fi**, enter the new network name and password, and select **Connect and save Wi-Fi**. Choose **Open network** only for a network without a password. Changing networks temporarily interrupts the pool connection and the dashboard. After connecting, join the new network on your phone and open the IP shown on the device.
+
+The new credentials are saved after a successful connection. A failed attempt restores the previous network after 30 seconds.
+
+If you move the device away from its saved network, power it on and allow **10 failed connection attempts**, approximately **1 minute 45 seconds** from power-up. Connect your phone to **HELIOS_HUNTER_SETUP** and open **http://192.168.4.1** to enter the new network. Power cycling resets the attempt counter. Mining and wallet settings are retained during Wi-Fi setup.
 
 ## First Boot
 
@@ -144,6 +135,7 @@ The firmware checks:
 
 - Cheetahcoin (CHTA)
 - WojakCoin (WJK)
+- Garlicoin (GRLC)
 - DigiByte (DGB)
 - eCash (XEC)
 - Zcash (ZEC, transparent `t1`/`t3` addresses)

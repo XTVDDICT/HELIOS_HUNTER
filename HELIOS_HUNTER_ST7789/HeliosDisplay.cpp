@@ -168,6 +168,7 @@ void HeliosDisplay::begin(HeliosSettings* settings, HeliosBalances* balances) {
   appliedRearLedEnabled_ = settings_->data().rearLedEnabled;
   appliedSleepSeconds_ = settings_->data().screenSleepSeconds;
   lastInteractionAt_ = millis();
+  displayPolicy_.begin(millis());
   pinMode(LED_RED_PIN, OUTPUT);
   pinMode(LED_GREEN_PIN, OUTPUT);
   pinMode(LED_BLUE_PIN, OUTPUT);
@@ -186,19 +187,12 @@ void HeliosDisplay::loop() {
     touching_ = false;
     redrawRequested_ = true;
   }
-  if (cfg.brightness != appliedBrightness_) {
-    appliedBrightness_ = cfg.brightness;
-    if (!screenSleeping_) display.setBrightness(appliedBrightness_);
-  }
-  if (cfg.rearLedEnabled != appliedRearLedEnabled_) {
-    appliedRearLedEnabled_ = cfg.rearLedEnabled;
-    updateRearLed();
-  }
-  if (cfg.screenSleepSeconds != appliedSleepSeconds_) {
-    appliedSleepSeconds_ = cfg.screenSleepSeconds;
-    lastInteractionAt_ = millis();
-    if (appliedSleepSeconds_ == 0 && screenSleeping_) wakeScreen();
-  }
+  const bool powerChanged = appliedBrightness_ != cfg.brightness ||
+                            appliedRearLedEnabled_ != cfg.rearLedEnabled;
+  const bool wasNight = displayPolicy_.night;
+  appliedBrightness_ = cfg.brightness;
+  appliedRearLedEnabled_ = cfg.rearLedEnabled;
+  appliedSleepSeconds_ = cfg.screenSleepSeconds;
   if (cfg.flipped != appliedFlipped_) {
     appliedFlipped_ = cfg.flipped;
     display.setRotation(appliedFlipped_ ? 3 : 1);
@@ -210,6 +204,17 @@ void HeliosDisplay::loop() {
     lastBalanceCheckAt_ = now;
     checkBalanceIncreases();
   }
+  bool wasSleeping = screenSleeping_;
+  if (displayPolicy_.update(now, nightClock_.active(cfg.displayOptions),
+                            cfg.screenSleepSeconds, cfg.displayOptions.autoClear)) {
+    clearBlockPopup();
+  }
+  screenSleeping_ = displayPolicy_.sleeping;
+  if (powerChanged || wasSleeping != screenSleeping_) {
+    display.setBrightness(screenSleeping_ ? 0 : appliedBrightness_);
+  }
+  if (powerChanged || wasNight != displayPolicy_.night) updateRearLed();
+  if (wasSleeping && !screenSleeping_) redrawRequested_ = true;
   if (screenSleeping_) {
     if (now - lastSleepingTouchPollAt_ >= 50) {
       lastSleepingTouchPollAt_ = now;
@@ -218,11 +223,8 @@ void HeliosDisplay::loop() {
     return;
   }
   handleTouch();
-  if (blockPopupActive_) return;
-  if (appliedSleepSeconds_ > 0 &&
-      now - lastInteractionAt_ >=
-          static_cast<uint32_t>(appliedSleepSeconds_) * 1000UL) {
-    sleepScreen();
+  if (blockPopupActive_) {
+    if (redrawRequested_) { redrawRequested_ = false; draw(true); drawBlockPopup(); }
     return;
   }
   if (redrawRequested_) {
@@ -432,7 +434,9 @@ void HeliosDisplay::checkBalanceIncreases() {
     blockPopupAmount_ = snapshot.increaseAmount;
     blockPopupSequence_ = snapshot.increaseSequence;
     blockPopupActive_ = true;
-    if (screenSleeping_) wakeScreen();
+    displayPolicy_.blockFound(millis());
+    screenSleeping_ = false;
+    display.setBrightness(appliedBrightness_);
     drawBlockPopup();
     return;
   }
@@ -467,12 +471,13 @@ void HeliosDisplay::clearBlockPopup() {
     balances_->acknowledgeIncrease(blockPopupCoin_, blockPopupSequence_);
   }
   blockPopupActive_ = false;
+  displayPolicy_.blockCleared();
   blockPopupSequence_ = 0;
   draw(true);
 }
 
 void HeliosDisplay::setRearLed(uint16_t color) {
-  if (!settings_ || !settings_->data().rearLedEnabled) {
+  if (!settings_ || !settings_->data().rearLedEnabled || displayPolicy_.night) {
     turnRearLedOff();
     return;
   }
@@ -491,29 +496,29 @@ void HeliosDisplay::turnRearLedOff() {
 }
 
 void HeliosDisplay::updateRearLed() {
-  if (!settings_ || !settings_->data().rearLedEnabled) {
+  if (!settings_ || !settings_->data().rearLedEnabled || displayPolicy_.night) {
     turnRearLedOff();
     return;
   }
-  setRearLed(page_ == 0 ? HELIOS_AMBER
-                        : heliosDisplayCoinProfileAt(page_ - 1).color);
+  setRearLed(blockPopupActive_ ? heliosCoinProfile(blockPopupCoin_).color
+                             : (page_ == 0 ? HELIOS_AMBER
+                                          : heliosDisplayCoinProfileAt(page_ - 1).color));
 }
 
 void HeliosDisplay::sleepScreen() {
-  if (screenSleeping_) return;
+  displayPolicy_.sleeping = true;
   screenSleeping_ = true;
-  touching_ = false;
-  suppressTouchUntilRelease_ = false;
   display.setBrightness(0);
 }
 
 void HeliosDisplay::wakeScreen() {
+  displayPolicy_.touch(millis());
   lastInteractionAt_ = millis();
-  if (!screenSleeping_) return;
   screenSleeping_ = false;
   display.setBrightness(appliedBrightness_);
   redrawRequested_ = false;
   draw(true);
+  if (blockPopupActive_) drawBlockPopup();
 }
 
 bool HeliosDisplay::pageVisible(uint8_t page) const {
@@ -603,6 +608,7 @@ void HeliosDisplay::handleTouch() {
     touching_ = false;
     return;
   }
+  if (pressed) displayPolicy_.touch(now);
   if (pressed && blockPopupActive_) {
     lastInteractionAt_ = now;
     clearBlockPopup();

@@ -13,11 +13,12 @@
 #include "HeliosDiagnostics.h"
 #include "HeliosNetworkMemory.h"
 #include "HeliosWebPageGzip.h"
+#include "HunterNightMode.h"
 #include "SoloHunterSha256.h"
 
 namespace {
 
-constexpr char FIRMWARE_BUILD[] = "R23_GRLC_BALANCE_MINING_20261028";
+constexpr char FIRMWARE_BUILD[] = "V1.0.12_DEVICE_WIFI_20261119";
 
 class BufferedNetworkWriter : public Print {
  public:
@@ -240,6 +241,9 @@ void HeliosWeb::begin(HeliosSettings* settings, HeliosBalances* balances,
       vTaskDelay(1);
     }
   });
+  server_.on("/api/timezones", HTTP_GET, [this]() {
+    server_.send_P(200, "application/json", HUNTER_TIMEZONE_NAMES_JSON);
+  });
   server_.on("/api/status", HTTP_GET, [this]() { handleStatus(); });
   server_.on("/api/diagnostics/crash", HTTP_GET, [this]() {
     JsonDocument document;
@@ -380,6 +384,7 @@ void HeliosWeb::begin(HeliosSettings* settings, HeliosBalances* balances,
   server_.on("/api/mining", HTTP_POST, [this]() { handleMining(); });
   server_.on("/api/mining-settings", HTTP_POST, [this]() { handleMiningSettings(); });
   server_.on("/api/device", HTTP_POST, [this]() { handleDevice(); });
+  server_.on("/api/wifi", HTTP_POST, [this]() { handleWifi(); });
   server_.onNotFound([this]() { sendError(404, "Not found"); });
   server_.begin();
 }
@@ -393,6 +398,55 @@ void HeliosWeb::loop() {
   server_.handleClient();
 }
 
+void HeliosWeb::handleWifi() {
+  if (wifiBusy_) {
+    sendError(409, "A Wi-Fi change is already in progress");
+    return;
+  }
+  const String ssid = server_.arg("ssid");
+  const String password = server_.arg("password");
+  bool validPassword = password.length() >= 8 && password.length() <= 63;
+  if (password.length() == 64) {
+    validPassword = true;
+    for (size_t i = 0; i < password.length(); ++i) {
+      const char c = password[i];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+            (c >= 'A' && c <= 'F'))) validPassword = false;
+    }
+  }
+  const bool openNetwork = server_.arg("open") == "1";
+  if (!server_.hasArg("ssid") || ssid.isEmpty() || ssid.length() > 32 ||
+      memchr(ssid.c_str(), 0, ssid.length()) != nullptr ||
+      memchr(password.c_str(), 0, password.length()) != nullptr ||
+      (openNetwork ? !password.isEmpty() : !validPassword)) {
+    sendError(400, "Enter a 1-32 byte network name and an 8-63 character password, a 64-digit hex key, or select Open network");
+    return;
+  }
+  wifiSsid_ = ssid;
+  wifiPassword_ = password;
+  wifiMessage_ = "Trying the new Wi-Fi. If it fails, the previous network will be restored.";
+  wifiQueuedAt_ = millis();
+  wifiBusy_ = true;
+  wifiQueued_ = true;
+  server_.send(202, "application/json", "{\"ok\":true}");
+}
+
+bool HeliosWeb::takeWifiChange(String& ssid, String& password) {
+  // Let the response reach the browser before leaving this network.
+  if (!wifiQueued_ || millis() - wifiQueuedAt_ < 1000U) return false;
+  ssid = wifiSsid_;
+  password = wifiPassword_;
+  wifiSsid_ = "";
+  wifiPassword_ = "";
+  wifiQueued_ = false;
+  return true;
+}
+
+void HeliosWeb::finishWifiChange(const char* message) {
+  wifiMessage_ = message;
+  wifiBusy_ = false;
+}
+
 void HeliosWeb::handleStatus() {
   const bool compact =
       server_.hasArg("compact") && server_.arg("compact") == "1";
@@ -401,6 +455,9 @@ void HeliosWeb::handleStatus() {
   const HeliosBalanceFetchState fetch = balances_->fetchState(true);
   JsonDocument document;
   document["wifi"] = WiFi.status() == WL_CONNECTED;
+  document["wifiSsid"] = WiFi.SSID();
+  document["wifiChangeBusy"] = wifiBusy_;
+  document["wifiMessage"] = wifiMessage_;
   document["build"] = FIRMWARE_BUILD;
   document["ip"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("--");
   document["status"] = stats.status;
@@ -413,6 +470,20 @@ void HeliosWeb::handleStatus() {
   document["pool"] = cfg.miningPoolHost + ":" + cfg.miningPoolPort;
   document["username"] = cfg.miningUsername;
   document["hashrateKh"] = stats.hashrateKh;
+  document["averageHashrateKh"] = stats.averageHashrateKh;
+  document["peakHashrateKh"] = stats.peakHashrateKh;
+  document["sessionUptimeSeconds"] = stats.uptimeSeconds;
+  document["rejectionPercent"] = stats.acceptedShares + stats.rejectedShares > 0
+      ? 100.0 * stats.rejectedShares / (double(stats.acceptedShares) + stats.rejectedShares) : 0.0;
+  document["autoClear"] = cfg.displayOptions.autoClear;
+  document["nightEnabled"] = cfg.displayOptions.nightEnabled;
+  document["nightStart"] = hunterTimeText(cfg.displayOptions.nightStart);
+  document["nightEnd"] = hunterTimeText(cfg.displayOptions.nightEnd);
+  document["nightZone"] = cfg.displayOptions.timezone;
+  static HunterNightClock statusClock;
+  document["nightActive"] = statusClock.active(cfg.displayOptions);
+  document["nightClockValid"] = statusClock.valid;
+  document["firmwareVersion"] = "1.0.12";
   document["primaryHashrateKh"] = stats.primaryHashrateKh;
   document["auxiliaryHashrateKh"] = stats.auxiliaryHashrateKh;
   document["accepted"] = stats.acceptedShares;
@@ -531,11 +602,26 @@ void HeliosWeb::handleMiningSettings() {
   if (enabled && username.isEmpty()) { sendError(400, "Enter a wallet or pool username before enabling mining"); return; }
   settings_->setMining(host, static_cast<uint16_t>(portValue), username,
                        server_.arg("worker"), server_.arg("password"), enabled);
+  if (server_.hasArg("autoClear")) {
+    HunterDisplayOptions options = settings_->data().displayOptions;
+    options.autoClear = server_.arg("autoClear") == "1";
+    settings_->setDisplayOptions(options);
+  }
   if (settingsCallback_) settingsCallback_();
   sendOk();
 }
 
 void HeliosWeb::handleDevice() {
+  if (server_.hasArg("nightEnabled")) {
+    HunterDisplayOptions options = settings_->data().displayOptions;
+    if (!hunterReadNightOptions(server_.arg("nightStart"), server_.arg("nightEnd"),
+                               server_.arg("nightZone"), options)) {
+      sendError(400, "Choose valid, different start/end times and a time zone.");
+      return;
+    }
+    options.nightEnabled = server_.arg("nightEnabled") == "1";
+    settings_->setDisplayOptions(options);
+  }
   if (server_.hasArg("brightness")) settings_->setBrightness(static_cast<uint8_t>(constrain(server_.arg("brightness").toInt(), 20, 255)));
   if (server_.hasArg("rearLed")) settings_->setRearLedEnabled(server_.arg("rearLed") == "1");
   if (server_.hasArg("screenSleep")) settings_->setScreenSleepSeconds(static_cast<uint16_t>(constrain(server_.arg("screenSleep").toInt(), 0, 1800)));

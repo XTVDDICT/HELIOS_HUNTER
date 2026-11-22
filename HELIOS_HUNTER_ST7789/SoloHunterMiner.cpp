@@ -186,6 +186,7 @@ void setHashTelemetry(float hashrateKh, float primaryHashrateKh,
                       bool hardwareSha) {
   lockState();
   activeStats.hashrateKh = hashrateKh;
+  if (hashrateKh > activeStats.peakHashrateKh) activeStats.peakHashrateKh = hashrateKh;
   activeStats.primaryHashrateKh = primaryHashrateKh;
   activeStats.auxiliaryHashrateKh = auxiliaryHashrateKh;
   activeStats.totalHashes = totalHashes;
@@ -262,6 +263,7 @@ void resetRunStats(bool hardwareSha) {
   activeStats.primaryHashrateKh = 0.0f;
   activeStats.auxiliaryHashrateKh = 0.0f;
   activeStats.totalHashes = 0;
+  activeStats.peakHashrateKh = 0.0f;
   activeStats.submittedShares = 0;
   activeStats.pendingShares = 0;
   activeStats.acceptedShares = 0;
@@ -1057,7 +1059,7 @@ bool sendSubscribe(Client& client, MiningSession& session) {
   JsonDocument request;
   request["id"] = session.subscribeId;
   request["method"] = "mining.subscribe";
-  request["params"].to<JsonArray>().add("HELIOS_HUNTER/1.0.7");
+  request["params"].to<JsonArray>().add("HELIOS_HUNTER/1.0.12");
   return sendDocument(client, request);
 }
 
@@ -1808,6 +1810,8 @@ SoloHunterMiningStats soloHunterMinerGetStats(bool includeStack) {
   SoloHunterMiningStats copy = activeStats;
   copy.uptimeSeconds =
       statsStartedAt > 0 ? (uint32_t)((millis() - statsStartedAt) / 1000U) : 0;
+  copy.averageHashrateKh = copy.uptimeSeconds > 0
+      ? double(copy.totalHashes) / (double(copy.uptimeSeconds) * 1000.0) : 0.0;
   unlockState();
   if (includeStack) {
     copy.auxiliaryMode = auxiliaryMode.load(std::memory_order_relaxed);

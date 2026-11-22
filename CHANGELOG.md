@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.12 - 2026-11-22
+
+- Added Wi-Fi network name/password controls to the Device page, with an explicit open-network option.
+- Try new Wi-Fi credentials before saving them. Failed connection attempts restore the previous network after 30 seconds.
+- Open HELIOS_HUNTER_SETUP after 10 failed saved-network attempts. Power cycling starts a new set of attempts.
+- Compacted Device settings into display/lighting and Wi-Fi cards, arranged side by side on desktop and stacked on phones.
+- Added optional night schedules with start/end times and named timezones. Scheduled sleep turns off the backlight and rear LEDs while mining continues.
+- Improved touch wake and block-alert handling. Optional 30-second alert auto-clear defaults to off.
+- Added session uptime, average/peak hashrate in kH/s, and rejected-share percentage to the web dashboard.
+
+- Publish merged fresh installers and application-only updates for both screen controllers, with SHA-256 checksums and ESP-flasher instructions.
+
 ## v1.0.11 - 2026-10-28
 
 - Add an auto-saving "Show on device" checkbox to every coin's web tab.

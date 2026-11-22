@@ -33,3 +33,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Timezone Data
+
+The optional night-mode timezone tables use IANA tzdb 2026f data distributed through Moment Timezone. The Moment Timezone MIT notice is included in each screen sketch as TIMEZONE-LICENSE.txt.

@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "HeliosCoins.h"
+#include "HunterNightMode.h"
 
 struct HeliosSettingsData {
   String wallets[HELIOS_COIN_COUNT];
@@ -18,6 +19,7 @@ struct HeliosSettingsData {
   uint8_t brightness = 220;
   uint8_t fiatCurrency = 0;
   uint16_t screenSleepSeconds = 0;
+  HunterDisplayOptions displayOptions;
 };
 
 class HeliosSettings {
@@ -36,6 +38,7 @@ class HeliosSettings {
   void setBrightness(uint8_t brightness);
   void setFiatCurrency(uint8_t currency);
   void setScreenSleepSeconds(uint16_t seconds);
+  void setDisplayOptions(const HunterDisplayOptions& options);
 
  private:
   void saveText(const char* key, const String& value);

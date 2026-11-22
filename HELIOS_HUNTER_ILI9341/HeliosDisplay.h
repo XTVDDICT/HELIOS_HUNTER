@@ -7,6 +7,7 @@
 #include "HeliosCoins.h"
 #include "HeliosMiner.h"
 #include "HeliosSettings.h"
+#include "HunterDisplayPolicy.h"
 
 class HeliosDisplay {
  public:
@@ -49,6 +50,8 @@ class HeliosDisplay {
   bool appliedFlipped_ = false;
   bool appliedRearLedEnabled_ = true;
   bool screenSleeping_ = false;
+  HunterDisplayPolicy displayPolicy_;
+  HunterNightClock nightClock_;
   bool suppressTouchUntilRelease_ = false;
   bool redrawRequested_ = false;
   bool touching_ = false;
